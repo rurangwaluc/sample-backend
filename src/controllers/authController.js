@@ -36,13 +36,11 @@ function readSignedSid(request) {
 
 function sidCookieOptions(expiresAt) {
   const isProd = env.NODE_ENV === "production";
-  const secure = Boolean(env.COOKIE_SECURE);
-  const sameSite = isProd ? "none" : "lax";
 
   const opts = {
     httpOnly: true,
-    secure,
-    sameSite,
+    secure: true, // 🔥 FORCE TRUE
+    sameSite: "none", // 🔥 REQUIRED for Vercel ↔ Render
     path: "/",
     signed: true,
     expires: expiresAt,
