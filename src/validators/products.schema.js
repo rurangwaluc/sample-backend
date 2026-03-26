@@ -1,15 +1,9 @@
 const { z } = require("zod");
-
-const PRODUCT_TYPES = [
-  "HARDWARE",
-  "APPAREL",
-  "FOOTWEAR",
-  "PPE",
-  "ACCESSORY",
-  "OTHER",
-];
-
-const GENDERS = ["MEN", "WOMEN", "UNISEX", "KIDS"];
+const {
+  PRODUCT_TYPES,
+  SYSTEM_CATEGORIES,
+  PRODUCT_UNITS,
+} = require("../utils/productCatalog");
 
 function upperTrim(v) {
   return String(v || "")
@@ -22,7 +16,12 @@ const createProductSchema = z.object({
 
   name: z.string().trim().min(2).max(160),
   sku: z.string().trim().max(80).optional(),
-  unit: z.string().trim().min(1).max(30).default("PIECE"),
+  unit: z
+    .string()
+    .trim()
+    .transform(upperTrim)
+    .refine((value) => PRODUCT_UNITS.includes(value), "Invalid unit")
+    .default("PIECE"),
 
   sellingPrice: z.coerce.number().int().min(0),
   costPrice: z.coerce.number().int().min(0).default(0),
@@ -34,10 +33,20 @@ const createProductSchema = z.object({
   productType: z
     .string()
     .transform(upperTrim)
-    .refine((v) => PRODUCT_TYPES.includes(v), "Invalid productType")
-    .default("HARDWARE"),
+    .refine((value) => PRODUCT_TYPES.includes(value), "Invalid productType")
+    .default("PP_BAG"),
 
-  category: z.string().trim().max(80).optional(),
+  systemCategory: z
+    .string()
+    .trim()
+    .transform(upperTrim)
+    .refine(
+      (value) => SYSTEM_CATEGORIES.includes(value),
+      "Invalid systemCategory",
+    )
+    .optional(),
+
+  category: z.string().trim().max(120).optional(),
   subcategory: z.string().trim().max(80).optional(),
 
   brand: z.string().trim().max(80).optional(),
@@ -52,22 +61,18 @@ const createProductSchema = z.object({
   supplierCode: z.string().trim().max(120).optional(),
 
   reorderLevel: z.coerce.number().int().min(0).optional().default(0),
-
-  gender: z
-    .string()
-    .transform(upperTrim)
-    .refine((v) => !v || GENDERS.includes(v), "Invalid gender")
-    .optional(),
-
-  season: z.string().trim().max(40).optional(),
-
   openingQty: z.coerce.number().int().min(0).optional().default(0),
 });
 
 const updateProductSchema = z.object({
   name: z.string().trim().min(2).max(160).optional(),
   sku: z.string().trim().max(80).optional(),
-  unit: z.string().trim().min(1).max(30).optional(),
+  unit: z
+    .string()
+    .trim()
+    .transform(upperTrim)
+    .refine((value) => PRODUCT_UNITS.includes(value), "Invalid unit")
+    .optional(),
 
   sellingPrice: z.coerce.number().int().min(0).optional(),
   costPrice: z.coerce.number().int().min(0).optional(),
@@ -79,10 +84,20 @@ const updateProductSchema = z.object({
   productType: z
     .string()
     .transform(upperTrim)
-    .refine((v) => PRODUCT_TYPES.includes(v), "Invalid productType")
+    .refine((value) => PRODUCT_TYPES.includes(value), "Invalid productType")
     .optional(),
 
-  category: z.string().trim().max(80).optional(),
+  systemCategory: z
+    .string()
+    .trim()
+    .transform(upperTrim)
+    .refine(
+      (value) => SYSTEM_CATEGORIES.includes(value),
+      "Invalid systemCategory",
+    )
+    .optional(),
+
+  category: z.string().trim().max(120).optional(),
   subcategory: z.string().trim().max(80).optional(),
 
   brand: z.string().trim().max(80).optional(),
@@ -97,14 +112,6 @@ const updateProductSchema = z.object({
   supplierCode: z.string().trim().max(120).optional(),
 
   reorderLevel: z.coerce.number().int().min(0).optional(),
-
-  gender: z
-    .string()
-    .transform(upperTrim)
-    .refine((v) => !v || GENDERS.includes(v), "Invalid gender")
-    .optional(),
-
-  season: z.string().trim().max(40).optional(),
 });
 
 const listProductsQuerySchema = z.object({
@@ -113,9 +120,21 @@ const listProductsQuerySchema = z.object({
   productType: z
     .string()
     .transform(upperTrim)
-    .refine((v) => !v || PRODUCT_TYPES.includes(v), "Invalid productType")
+    .refine(
+      (value) => !value || PRODUCT_TYPES.includes(value),
+      "Invalid productType",
+    )
     .optional(),
-  category: z.string().trim().max(80).optional(),
+  systemCategory: z
+    .string()
+    .trim()
+    .transform(upperTrim)
+    .refine(
+      (value) => !value || SYSTEM_CATEGORIES.includes(value),
+      "Invalid systemCategory",
+    )
+    .optional(),
+  category: z.string().trim().max(120).optional(),
   isActive: z
     .string()
     .trim()
@@ -128,7 +147,6 @@ const listProductsQuerySchema = z.object({
 
 module.exports = {
   PRODUCT_TYPES,
-  GENDERS,
   createProductSchema,
   updateProductSchema,
   listProductsQuerySchema,

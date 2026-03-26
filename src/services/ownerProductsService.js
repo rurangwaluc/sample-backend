@@ -8,7 +8,7 @@ const { eq, and, sql } = require("drizzle-orm");
 const { safeLogAudit } = require("./auditService");
 const {
   cleanText,
-  normalizeCategory,
+  normalizeSystemCategory,
   normalizeUnit,
   normalizePositiveInt,
   buildDisplayName,
@@ -68,9 +68,11 @@ function mapOwnerProductRow(row) {
         color: row.color,
         material: row.material,
         variantSummary: row.variantSummary,
+        attributes: row.attributes,
       }),
 
-    category: row.category ?? "GENERAL_HARDWARE",
+    systemCategory: row.systemCategory ?? "WOVEN_PP_BAG",
+    category: row.category ?? null,
     subcategory: row.subcategory ?? null,
 
     sku: row.sku ?? null,
@@ -177,15 +179,15 @@ async function getOwnerProductsSummary({ includeInactive = false } = {}) {
     ORDER BY l.name ASC
   `);
 
-  const byCategoryRows = await db.execute(sql`
+  const bySystemCategoryRows = await db.execute(sql`
     SELECT
-      p.category AS "category",
+      p.system_category AS "systemCategory",
       COUNT(*)::int AS "productsCount"
     FROM products p
     WHERE 1 = 1
     ${inactiveSql}
-    GROUP BY p.category
-    ORDER BY COUNT(*) DESC, p.category ASC
+    GROUP BY p.system_category
+    ORDER BY COUNT(*) DESC, p.system_category ASC
   `);
 
   const totals = (totalsRows.rows || totalsRows)[0] || {
@@ -198,7 +200,7 @@ async function getOwnerProductsSummary({ includeInactive = false } = {}) {
   return {
     totals,
     byLocation: byLocationRows.rows || byLocationRows,
-    byCategory: byCategoryRows.rows || byCategoryRows,
+    bySystemCategory: bySystemCategoryRows.rows || bySystemCategoryRows,
   };
 }
 
@@ -229,6 +231,7 @@ async function listOwnerProducts({
         OR COALESCE(p.supplier_sku, '') ILIKE ${"%" + searchValue + "%"}
         OR COALESCE(p.brand, '') ILIKE ${"%" + searchValue + "%"}
         OR COALESCE(p.model, '') ILIKE ${"%" + searchValue + "%"}
+        OR COALESCE(p.system_category, '') ILIKE ${"%" + searchValue + "%"}
         OR COALESCE(p.category, '') ILIKE ${"%" + searchValue + "%"}
         OR COALESCE(p.subcategory, '') ILIKE ${"%" + searchValue + "%"}
         OR l.name ILIKE ${"%" + searchValue + "%"}
@@ -253,6 +256,7 @@ async function listOwnerProducts({
 
       p.name AS "name",
       p.display_name AS "displayName",
+      p.system_category AS "systemCategory",
       p.category AS "category",
       p.subcategory AS "subcategory",
 
@@ -322,6 +326,7 @@ async function getOwnerProductBranchesByProductId({
       p.id::int AS "productId",
       p.name AS "name",
       p.display_name AS "displayName",
+      p.system_category AS "systemCategory",
       p.category AS "category",
       p.subcategory AS "subcategory",
       p.sku AS "sku",
@@ -379,6 +384,7 @@ async function getOwnerProductBranchesByProductId({
     productId: rows[0].productId,
     name: rows[0].name,
     displayName: rows[0].displayName,
+    systemCategory: rows[0].systemCategory,
     category: rows[0].category,
     subcategory: rows[0].subcategory,
     sku: rows[0].sku,
@@ -427,7 +433,7 @@ async function createOwnerProduct({ actorUser, data }) {
 
   return db.transaction(async (tx) => {
     const openingQty = normalizePositiveInt(data.openingQty, 0);
-    const category = normalizeCategory(data.category);
+    const systemCategory = normalizeSystemCategory(data.systemCategory);
     const { legacyUnit, stockUnit, salesUnit, purchaseUnit } = buildUnits(data);
 
     const name = cleanText(data.name, 180);
@@ -437,6 +443,7 @@ async function createOwnerProduct({ actorUser, data }) {
     const color = cleanText(data.color, 40);
     const material = cleanText(data.material, 80);
     const variantSummary = cleanText(data.variantSummary, 200);
+    const attributes = normalizeAttributes(data.attributes);
 
     const displayName =
       cleanText(data.displayName, 220) ||
@@ -448,6 +455,7 @@ async function createOwnerProduct({ actorUser, data }) {
         color,
         material,
         variantSummary,
+        attributes,
       });
 
     const [created] = await tx
@@ -456,17 +464,21 @@ async function createOwnerProduct({ actorUser, data }) {
         locationId: targetLocationId,
         name,
         displayName,
-        category,
+        productType: "PP_BAG",
+        systemCategory,
+        category: cleanText(data.category, 120),
         subcategory: cleanText(data.subcategory, 80),
         sku: cleanText(data.sku, 80),
         barcode: cleanText(data.barcode, 120),
         supplierSku: cleanText(data.supplierSku, 120),
+        supplierCode: cleanText(data.supplierSku, 120),
         brand,
         model,
         size,
         color,
         material,
         variantSummary,
+        variantLabel: cleanText(data.variantSummary, 120),
         unit: legacyUnit,
         stockUnit,
         salesUnit,
@@ -479,7 +491,7 @@ async function createOwnerProduct({ actorUser, data }) {
         notes: cleanText(data.notes, 4000),
         trackInventory: data.trackInventory !== false,
         reorderLevel: normalizePositiveInt(data.reorderLevel, 0),
-        attributes: normalizeAttributes(data.attributes),
+        attributes,
         isActive: true,
         updatedAt: new Date(),
       })
@@ -513,7 +525,8 @@ async function createOwnerProduct({ actorUser, data }) {
       description: `Owner created product ${displayName || name}`,
       meta: {
         locationId: targetLocationId,
-        category,
+        systemCategory,
+        category: cleanText(data.category, 120),
         sku: cleanText(data.sku, 80),
         barcode: cleanText(data.barcode, 120),
         openingQty,
@@ -565,10 +578,10 @@ async function updateOwnerProduct({ actorUser, productId, data }) {
       nextLocationId = targetLocationId;
     }
 
-    const category =
-      data.category !== undefined
-        ? normalizeCategory(data.category)
-        : existing.category;
+    const systemCategory =
+      data.systemCategory !== undefined
+        ? normalizeSystemCategory(data.systemCategory)
+        : existing.systemCategory;
 
     const unitInputs = {
       unit: data.unit !== undefined ? data.unit : existing.unit,
@@ -604,6 +617,11 @@ async function updateOwnerProduct({ actorUser, productId, data }) {
         ? cleanText(data.variantSummary, 200)
         : existing.variantSummary;
 
+    const nextAttributes =
+      data.attributes !== undefined
+        ? normalizeAttributes(data.attributes)
+        : existing.attributes;
+
     const displayName =
       data.displayName !== undefined
         ? cleanText(data.displayName, 220)
@@ -619,13 +637,19 @@ async function updateOwnerProduct({ actorUser, productId, data }) {
         color,
         material,
         variantSummary,
+        attributes: nextAttributes,
       });
 
     const patch = {
       locationId: nextLocationId,
       name,
       displayName: finalDisplayName,
-      category,
+      productType: "PP_BAG",
+      systemCategory,
+      category:
+        data.category !== undefined
+          ? cleanText(data.category, 120)
+          : existing.category,
       subcategory:
         data.subcategory !== undefined
           ? cleanText(data.subcategory, 80)
@@ -639,12 +663,17 @@ async function updateOwnerProduct({ actorUser, productId, data }) {
         data.supplierSku !== undefined
           ? cleanText(data.supplierSku, 120)
           : existing.supplierSku,
+      supplierCode:
+        data.supplierSku !== undefined
+          ? cleanText(data.supplierSku, 120)
+          : existing.supplierCode,
       brand,
       model,
       size,
       color,
       material,
       variantSummary,
+      variantLabel: cleanText(variantSummary, 120),
       unit: legacyUnit,
       stockUnit,
       salesUnit,
@@ -675,10 +704,7 @@ async function updateOwnerProduct({ actorUser, productId, data }) {
         data.reorderLevel !== undefined
           ? normalizePositiveInt(data.reorderLevel, 0)
           : Number(existing.reorderLevel ?? 0),
-      attributes:
-        data.attributes !== undefined
-          ? normalizeAttributes(data.attributes)
-          : existing.attributes,
+      attributes: nextAttributes,
       updatedAt: new Date(),
     };
 
@@ -745,6 +771,7 @@ async function updateOwnerProduct({ actorUser, productId, data }) {
       meta: {
         locationId: nextLocationId,
         previousLocationId: existing.locationId,
+        systemCategory,
       },
       locationId: nextLocationId,
     });
@@ -769,49 +796,65 @@ async function updateOwnerProductPricing({
   }
 
   return db.transaction(async (tx) => {
-    const foundRows = await tx
+    const rows = await tx
       .select()
       .from(products)
       .where(eq(products.id, parsedProductId))
       .limit(1);
 
-    const found = foundRows[0];
-    if (!found) {
+    const existing = rows[0];
+    if (!existing) {
       const err = new Error("Product not found");
       err.code = "NOT_FOUND";
       throw err;
     }
 
+    const patch = {
+      sellingPrice:
+        sellingPrice !== undefined
+          ? normalizePositiveInt(sellingPrice, 0)
+          : Number(existing.sellingPrice ?? 0),
+      costPrice:
+        purchasePrice !== undefined
+          ? normalizePositiveInt(purchasePrice, 0)
+          : Number(existing.costPrice ?? 0),
+      maxDiscountPercent:
+        maxDiscountPercent !== undefined
+          ? normalizePositiveInt(maxDiscountPercent, 0)
+          : Number(existing.maxDiscountPercent ?? 0),
+      updatedAt: new Date(),
+    };
+
     await tx
       .update(products)
-      .set({
-        costPrice: normalizePositiveInt(purchasePrice, 0),
-        sellingPrice: normalizePositiveInt(sellingPrice, 0),
-        maxDiscountPercent: normalizePositiveInt(maxDiscountPercent, 0),
-        updatedAt: new Date(),
-      })
+      .set(patch)
       .where(eq(products.id, parsedProductId));
 
     await safeLogAudit({
       userId: actorUser.id,
-      action: "OWNER_PRODUCT_PRICING_UPDATE",
+      action: "OWNER_PRODUCT_PRICE_UPDATE",
       entity: "product",
       entityId: parsedProductId,
-      description: `Owner updated pricing for product ${found.displayName || found.name}`,
+      description: `Owner updated pricing for product ${existing.name}`,
       meta: {
-        purchasePrice: normalizePositiveInt(purchasePrice, 0),
-        sellingPrice: normalizePositiveInt(sellingPrice, 0),
-        maxDiscountPercent: normalizePositiveInt(maxDiscountPercent, 0),
+        locationId: existing.locationId,
+        sellingPrice: patch.sellingPrice,
+        purchasePrice: patch.costPrice,
+        maxDiscountPercent: patch.maxDiscountPercent,
       },
-      locationId: found.locationId,
+      locationId: existing.locationId,
     });
 
-    const rows = await listOwnerProducts({ includeInactive: true });
-    return rows.find((row) => row.productId === parsedProductId) || null;
+    const fresh = await listOwnerProducts({
+      locationId: existing.locationId,
+      includeInactive: true,
+    });
+
+    return fresh.find((row) => row.productId === parsedProductId) || null;
   });
 }
 
-async function archiveOwnerProduct({ actorUser, productId, reason }) {
+async function archiveOwnerProduct({ actorUser, productId }) {
   const parsedProductId = toInt(productId);
   if (!parsedProductId) {
     const err = new Error("Invalid product id");
@@ -819,94 +862,40 @@ async function archiveOwnerProduct({ actorUser, productId, reason }) {
     throw err;
   }
 
-  return db.transaction(async (tx) => {
-    const foundRows = await tx
-      .select()
-      .from(products)
-      .where(eq(products.id, parsedProductId))
-      .limit(1);
+  const rows = await db
+    .select()
+    .from(products)
+    .where(eq(products.id, parsedProductId))
+    .limit(1);
 
-    const found = foundRows[0];
-    if (!found) {
-      const err = new Error("Product not found");
-      err.code = "NOT_FOUND";
-      throw err;
-    }
-
-    if (found.isActive === false) {
-      const rows = await listOwnerProducts({ includeInactive: true });
-      return rows.find((row) => row.productId === parsedProductId) || null;
-    }
-
-    const cleanReason = cleanText(reason, 200);
-    const nextNotes = cleanReason
-      ? `${String(found.notes || "").trim()}\n[ARCHIVED] ${cleanReason}`.trim()
-      : found.notes;
-
-    await tx
-      .update(products)
-      .set({
-        isActive: false,
-        notes: nextNotes,
-        updatedAt: new Date(),
-      })
-      .where(eq(products.id, parsedProductId));
-
-    await safeLogAudit({
-      userId: actorUser.id,
-      action: "OWNER_PRODUCT_ARCHIVE",
-      entity: "product",
-      entityId: parsedProductId,
-      description: `Owner archived product ${found.displayName || found.name}`,
-      meta: { reason: cleanReason },
-      locationId: found.locationId,
-    });
-
-    const rows = await listOwnerProducts({ includeInactive: true });
-    return rows.find((row) => row.productId === parsedProductId) || null;
-  });
-}
-
-async function restoreOwnerProduct({ actorUser, productId }) {
-  const parsedProductId = toInt(productId);
-  if (!parsedProductId) {
-    const err = new Error("Invalid product id");
-    err.code = "BAD_PRODUCT_ID";
+  const existing = rows[0];
+  if (!existing) {
+    const err = new Error("Product not found");
+    err.code = "NOT_FOUND";
     throw err;
   }
 
-  return db.transaction(async (tx) => {
-    const foundRows = await tx
-      .select()
-      .from(products)
-      .where(eq(products.id, parsedProductId))
-      .limit(1);
+  await db
+    .update(products)
+    .set({
+      isActive: false,
+      updatedAt: new Date(),
+    })
+    .where(eq(products.id, parsedProductId));
 
-    const found = foundRows[0];
-    if (!found) {
-      const err = new Error("Product not found");
-      err.code = "NOT_FOUND";
-      throw err;
-    }
-
-    await tx
-      .update(products)
-      .set({ isActive: true, updatedAt: new Date() })
-      .where(eq(products.id, parsedProductId));
-
-    await safeLogAudit({
-      userId: actorUser.id,
-      action: "OWNER_PRODUCT_RESTORE",
-      entity: "product",
-      entityId: parsedProductId,
-      description: `Owner restored product ${found.displayName || found.name}`,
-      meta: {},
-      locationId: found.locationId,
-    });
-
-    const rows = await listOwnerProducts({ includeInactive: true });
-    return rows.find((row) => row.productId === parsedProductId) || null;
+  await safeLogAudit({
+    userId: actorUser.id,
+    action: "OWNER_PRODUCT_ARCHIVE",
+    entity: "product",
+    entityId: parsedProductId,
+    description: `Owner archived product ${existing.name}`,
+    meta: {
+      locationId: existing.locationId,
+    },
+    locationId: existing.locationId,
   });
+
+  return { success: true };
 }
 
 module.exports = {
@@ -919,5 +908,4 @@ module.exports = {
   updateOwnerProduct,
   updateOwnerProductPricing,
   archiveOwnerProduct,
-  restoreOwnerProduct,
 };

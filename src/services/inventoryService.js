@@ -3,29 +3,16 @@
 const { db } = require("../config/db");
 const { products } = require("../db/schema/products.schema");
 const { inventoryBalances } = require("../db/schema/inventory.schema");
-const { internalNotes } = require("../db/schema/internal_notes.schema");
 const { eq, and, sql } = require("drizzle-orm");
 const { safeLogAudit } = require("./auditService");
 const {
   cleanText,
-  normalizeCategory,
+  normalizeSystemCategory,
   normalizeUnit,
   normalizePositiveInt,
+  buildDisplayName,
+  normalizeAttributes,
 } = require("../utils/productCatalog");
-
-function buildProductDisplayName(row = {}) {
-  return [
-    cleanText(row.name, 160),
-    cleanText(row.brand, 80),
-    cleanText(row.model, 120),
-    cleanText(row.size, 40),
-    cleanText(row.color, 40),
-    cleanText(row.variantLabel, 120),
-  ]
-    .filter(Boolean)
-    .join(" ")
-    .trim();
-}
 
 function mapProductRow(row, includePurchasePrice = true) {
   if (!row) return null;
@@ -36,27 +23,44 @@ function mapProductRow(row, includePurchasePrice = true) {
     id: Number(row.id),
     locationId: Number(row.locationId),
     name: row.name,
-    displayName: buildProductDisplayName(row) || row.name || null,
+    displayName:
+      row.displayName ||
+      buildDisplayName({
+        name: row.name,
+        brand: row.brand,
+        model: row.model,
+        size: row.size,
+        color: row.color,
+        material: row.material,
+        variantSummary: row.variantSummary,
+        attributes: row.attributes,
+      }) ||
+      row.name ||
+      null,
 
-    productType: row.productType ?? "HARDWARE",
-    category: row.category ?? "GENERAL",
+    productType: row.productType ?? "PP_BAG",
+    systemCategory: row.systemCategory ?? "WOVEN_PP_BAG",
+    category: row.category ?? null,
     subcategory: row.subcategory ?? null,
 
     sku: row.sku ?? null,
     barcode: row.barcode ?? null,
     supplierCode: row.supplierCode ?? null,
+    supplierSku: row.supplierSku ?? row.supplierCode ?? null,
 
     brand: row.brand ?? null,
     model: row.model ?? null,
     variantLabel: row.variantLabel ?? null,
+    variantSummary: row.variantSummary ?? row.variantLabel ?? null,
     size: row.size ?? null,
     color: row.color ?? null,
     material: row.material ?? null,
 
-    gender: row.gender ?? null,
-    season: row.season ?? null,
-
     unit: row.unit ?? "PIECE",
+    stockUnit: row.stockUnit ?? row.unit ?? "PIECE",
+    salesUnit: row.salesUnit ?? row.unit ?? "PIECE",
+    purchaseUnit: row.purchaseUnit ?? row.unit ?? "PIECE",
+    purchaseUnitFactor: Number(row.purchaseUnitFactor ?? 1),
 
     sellingPrice: Number(row.sellingPrice ?? 0),
     costPrice: purchasePrice,
@@ -64,6 +68,9 @@ function mapProductRow(row, includePurchasePrice = true) {
 
     maxDiscountPercent: Number(row.maxDiscountPercent ?? 0),
     reorderLevel: Number(row.reorderLevel ?? 0),
+
+    trackInventory: row.trackInventory !== false,
+    attributes: row.attributes ?? null,
 
     isActive: row.isActive !== false,
     notes: row.notes ?? null,
@@ -75,16 +82,20 @@ function mapProductRow(row, includePurchasePrice = true) {
       row.qtyOnHand === undefined || row.qtyOnHand === null
         ? undefined
         : Number(row.qtyOnHand || 0),
+  };
+}
 
-    // compatibility fields for existing frontend code
-    stockUnit: row.unit ?? "PIECE",
-    salesUnit: row.unit ?? "PIECE",
-    purchaseUnit: row.unit ?? "PIECE",
-    purchaseUnitFactor: 1,
-    supplierSku: row.supplierCode ?? null,
-    variantSummary: row.variantLabel ?? null,
-    trackInventory: true,
-    attributes: null,
+function buildUnits(data = {}) {
+  const baseUnit = normalizeUnit(data.unit || "PIECE");
+  const stockUnit = normalizeUnit(data.stockUnit || baseUnit);
+  const salesUnit = normalizeUnit(data.salesUnit || stockUnit);
+  const purchaseUnit = normalizeUnit(data.purchaseUnit || stockUnit);
+
+  return {
+    unit: stockUnit,
+    stockUnit,
+    salesUnit,
+    purchaseUnit,
   };
 }
 
@@ -92,12 +103,10 @@ async function createProduct({ locationId, userId, data }) {
   return db.transaction(async (tx) => {
     const openingQty = normalizePositiveInt(data.openingQty, 0);
 
-    const name = cleanText(data.name, 160);
+    const name = cleanText(data.name, 180);
     const sku = cleanText(data.sku, 80);
-    const unit = normalizeUnit(data.unit || "PIECE");
-
-    const category = normalizeCategory(data.category);
-    const subcategory = cleanText(data.subcategory, 80);
+    const barcode = cleanText(data.barcode, 120);
+    const supplierSku = cleanText(data.supplierSku || data.supplierCode, 120);
 
     const brand = cleanText(data.brand, 80);
     const model = cleanText(data.model, 120);
@@ -105,42 +114,67 @@ async function createProduct({ locationId, userId, data }) {
     const color = cleanText(data.color, 40);
     const material = cleanText(data.material, 80);
 
-    const variantLabel =
-      cleanText(data.variantLabel, 120) || cleanText(data.variantSummary, 120);
+    const variantSummary =
+      cleanText(data.variantSummary, 200) || cleanText(data.variantLabel, 200);
 
-    const supplierCode =
-      cleanText(data.supplierCode, 120) || cleanText(data.supplierSku, 120);
+    const attributes = normalizeAttributes(data.attributes);
+    const systemCategory = normalizeSystemCategory(data.systemCategory);
+
+    const { unit, stockUnit, salesUnit, purchaseUnit } = buildUnits(data);
+
+    const displayName =
+      cleanText(data.displayName, 220) ||
+      buildDisplayName({
+        name,
+        brand,
+        model,
+        size,
+        color,
+        material,
+        variantSummary,
+        attributes,
+      });
 
     const [created] = await tx
       .insert(products)
       .values({
         locationId,
         name,
+        displayName,
         sku,
         unit,
+        stockUnit,
+        salesUnit,
+        purchaseUnit,
+        purchaseUnitFactor:
+          normalizePositiveInt(data.purchaseUnitFactor, 1) || 1,
 
-        productType: cleanText(data.productType, 40) || "HARDWARE",
-        category,
-        subcategory,
+        productType: "PP_BAG",
+        systemCategory,
+        category: cleanText(data.category, 120),
+        subcategory: cleanText(data.subcategory, 80),
 
         brand,
         model,
-        variantLabel,
+        variantLabel:
+          cleanText(data.variantLabel, 120) || cleanText(variantSummary, 120),
+        variantSummary,
         size,
         color,
         material,
 
-        barcode: cleanText(data.barcode, 120),
-        supplierCode,
+        barcode,
+        supplierCode: supplierSku,
+        supplierSku,
 
         reorderLevel: normalizePositiveInt(data.reorderLevel, 0),
-
-        gender: cleanText(data.gender, 20),
-        season: cleanText(data.season, 40),
 
         sellingPrice: normalizePositiveInt(data.sellingPrice, 0),
         costPrice: normalizePositiveInt(data.costPrice, 0),
         maxDiscountPercent: normalizePositiveInt(data.maxDiscountPercent, 0),
+
+        trackInventory: data.trackInventory !== false,
+        attributes,
 
         isActive: true,
         notes: cleanText(data.notes, 4000),
@@ -168,18 +202,17 @@ async function createProduct({ locationId, userId, data }) {
       });
     }
 
-    const displayName = buildProductDisplayName(created) || created.name;
-
     await safeLogAudit({
       userId,
       action: "PRODUCT_CREATE",
       entity: "product",
       entityId: created.id,
-      description: `Created product: ${displayName}`,
+      description: `Created product: ${displayName || name}`,
       meta: {
         productId: created.id,
         name: created.name,
         displayName,
+        systemCategory,
         category: created.category,
         locationId,
         openingQty,
@@ -209,25 +242,33 @@ async function listProducts({
       p.id,
       p.location_id as "locationId",
       p.name,
+      p.display_name as "displayName",
       p.product_type as "productType",
+      p.system_category as "systemCategory",
       p.category,
       p.subcategory,
       p.sku,
       p.barcode as "barcode",
       p.supplier_code as "supplierCode",
+      p.supplier_sku as "supplierSku",
       p.brand,
       p.model,
       p.variant_label as "variantLabel",
+      p.variant_summary as "variantSummary",
       p.size,
       p.color,
       p.material,
-      p.gender,
-      p.season,
       p.unit,
+      p.stock_unit as "stockUnit",
+      p.sales_unit as "salesUnit",
+      p.purchase_unit as "purchaseUnit",
+      p.purchase_unit_factor as "purchaseUnitFactor",
       p.selling_price as "sellingPrice",
       p.cost_price as "purchasePrice",
       p.max_discount_percent as "maxDiscountPercent",
       p.reorder_level as "reorderLevel",
+      p.track_inventory as "trackInventory",
+      p.attributes as "attributes",
       p.is_active as "isActive",
       p.notes,
       p.created_at as "createdAt",
@@ -239,7 +280,7 @@ async function listProducts({
      AND ib.location_id = p.location_id
     WHERE p.location_id = ${locationId}
     ${extraWhere}
-    ORDER BY p.id DESC
+    ORDER BY p.display_name ASC NULLS LAST, p.name ASC, p.id DESC
   `);
 
   const rows = result.rows || result || [];
@@ -259,11 +300,7 @@ async function updateProductPricing({
       .select({
         id: products.id,
         name: products.name,
-        brand: products.brand,
-        model: products.model,
-        size: products.size,
-        color: products.color,
-        variantLabel: products.variantLabel,
+        displayName: products.displayName,
       })
       .from(products)
       .where(
@@ -317,30 +354,38 @@ async function getInventoryBalances({ locationId, includeInactive = false }) {
       p.id,
       p.location_id as "locationId",
       p.name,
+      p.display_name as "displayName",
       p.product_type as "productType",
+      p.system_category as "systemCategory",
       p.category,
       p.subcategory,
       p.sku,
       p.barcode as "barcode",
       p.supplier_code as "supplierCode",
+      p.supplier_sku as "supplierSku",
       p.brand,
       p.model,
       p.variant_label as "variantLabel",
+      p.variant_summary as "variantSummary",
       p.size,
       p.color,
       p.material,
-      p.gender,
-      p.season,
       p.unit,
+      p.stock_unit as "stockUnit",
+      p.sales_unit as "salesUnit",
+      p.purchase_unit as "purchaseUnit",
+      p.purchase_unit_factor as "purchaseUnitFactor",
       p.selling_price as "sellingPrice",
       p.cost_price as "purchasePrice",
       p.max_discount_percent as "maxDiscountPercent",
       p.reorder_level as "reorderLevel",
+      p.track_inventory as "trackInventory",
+      p.attributes as "attributes",
       p.is_active as "isActive",
       p.notes,
       p.created_at as "createdAt",
       p.updated_at as "productUpdatedAt",
-      b.qty_on_hand as "qtyOnHand",
+      COALESCE(b.qty_on_hand, 0)::bigint as "qtyOnHand",
       b.updated_at as "updatedAt"
     FROM products p
     LEFT JOIN inventory_balances b
@@ -348,7 +393,7 @@ async function getInventoryBalances({ locationId, includeInactive = false }) {
      AND b.location_id = p.location_id
     WHERE p.location_id = ${locationId}
     ${extraWhere}
-    ORDER BY p.id DESC
+    ORDER BY p.display_name ASC NULLS LAST, p.name ASC, p.id DESC
   `);
 
   const rows = result.rows || result || [];
@@ -372,11 +417,14 @@ async function adjustInventory(
       .select({
         id: products.id,
         name: products.name,
+        displayName: products.displayName,
         brand: products.brand,
         model: products.model,
         size: products.size,
         color: products.color,
-        variantLabel: products.variantLabel,
+        material: products.material,
+        variantSummary: products.variantSummary,
+        attributes: products.attributes,
         isActive: products.isActive,
       })
       .from(products)
@@ -439,7 +487,18 @@ async function adjustInventory(
     }
 
     const productLabel =
-      buildProductDisplayName(productRows[0]) || productRows[0].name;
+      productRows[0].displayName ||
+      buildDisplayName({
+        name: productRows[0].name,
+        brand: productRows[0].brand,
+        model: productRows[0].model,
+        size: productRows[0].size,
+        color: productRows[0].color,
+        material: productRows[0].material,
+        variantSummary: productRows[0].variantSummary,
+        attributes: productRows[0].attributes,
+      }) ||
+      productRows[0].name;
 
     await safeLogAudit({
       userId: userId ?? null,
@@ -471,11 +530,14 @@ async function archiveProduct({ locationId, userId, productId, reason }) {
       .select({
         id: products.id,
         name: products.name,
+        displayName: products.displayName,
         brand: products.brand,
         model: products.model,
         size: products.size,
         color: products.color,
-        variantLabel: products.variantLabel,
+        material: products.material,
+        variantSummary: products.variantSummary,
+        attributes: products.attributes,
         isActive: products.isActive,
         notes: products.notes,
       })
@@ -510,7 +572,19 @@ async function archiveProduct({ locationId, userId, productId, reason }) {
       )
       .returning();
 
-    const productLabel = buildProductDisplayName(found[0]) || found[0].name;
+    const productLabel =
+      found[0].displayName ||
+      buildDisplayName({
+        name: found[0].name,
+        brand: found[0].brand,
+        model: found[0].model,
+        size: found[0].size,
+        color: found[0].color,
+        material: found[0].material,
+        variantSummary: found[0].variantSummary,
+        attributes: found[0].attributes,
+      }) ||
+      found[0].name;
 
     await safeLogAudit({
       userId,
@@ -532,11 +606,14 @@ async function restoreProduct({ locationId, userId, productId }) {
       .select({
         id: products.id,
         name: products.name,
+        displayName: products.displayName,
         brand: products.brand,
         model: products.model,
         size: products.size,
         color: products.color,
-        variantLabel: products.variantLabel,
+        material: products.material,
+        variantSummary: products.variantSummary,
+        attributes: products.attributes,
         isActive: products.isActive,
       })
       .from(products)
@@ -562,7 +639,19 @@ async function restoreProduct({ locationId, userId, productId }) {
       )
       .returning();
 
-    const productLabel = buildProductDisplayName(found[0]) || found[0].name;
+    const productLabel =
+      found[0].displayName ||
+      buildDisplayName({
+        name: found[0].name,
+        brand: found[0].brand,
+        model: found[0].model,
+        size: found[0].size,
+        color: found[0].color,
+        material: found[0].material,
+        variantSummary: found[0].variantSummary,
+        attributes: found[0].attributes,
+      }) ||
+      found[0].name;
 
     await safeLogAudit({
       userId,
@@ -584,11 +673,7 @@ async function deleteProductIfSafe({ locationId, userId, productId }) {
       .select({
         id: products.id,
         name: products.name,
-        brand: products.brand,
-        model: products.model,
-        size: products.size,
-        color: products.color,
-        variantLabel: products.variantLabel,
+        displayName: products.displayName,
       })
       .from(products)
       .where(
@@ -618,24 +703,6 @@ async function deleteProductIfSafe({ locationId, userId, productId }) {
       throw err;
     }
 
-    const noteRows = await tx
-      .select({ id: internalNotes.id })
-      .from(internalNotes)
-      .where(
-        and(
-          eq(internalNotes.locationId, locationId),
-          eq(internalNotes.entityType, "product"),
-          eq(internalNotes.entityId, productId),
-        ),
-      )
-      .limit(1);
-
-    if (noteRows.length > 0) {
-      const err = new Error("Cannot delete: product has notes");
-      err.code = "HAS_NOTES";
-      throw err;
-    }
-
     await tx
       .delete(inventoryBalances)
       .where(
@@ -651,19 +718,17 @@ async function deleteProductIfSafe({ locationId, userId, productId }) {
         and(eq(products.id, productId), eq(products.locationId, locationId)),
       );
 
-    const productLabel = buildProductDisplayName(found[0]) || found[0].name;
-
     await safeLogAudit({
       userId,
       action: "PRODUCT_DELETE",
       entity: "product",
       entityId: productId,
-      description: `Deleted product: ${productLabel}`,
+      description: `Deleted product: ${found[0].displayName || found[0].name}`,
       meta: { productId, locationId },
       locationId,
     });
 
-    return { ok: true };
+    return { success: true };
   });
 }
 

@@ -6,6 +6,7 @@ const { products } = require("../db/schema/products.schema");
 const { locations } = require("../db/schema/locations.schema");
 const { inventoryBalances } = require("../db/schema/inventory.schema");
 const { safeLogAudit } = require("./auditService");
+const { buildDisplayName } = require("../utils/productCatalog");
 
 const LOW_STOCK_THRESHOLD = 5;
 
@@ -31,34 +32,85 @@ function mapOwnerInventoryRow(row) {
     locationName: row.locationName ?? row.location_name ?? "",
     locationCode: row.locationCode ?? row.location_code ?? "",
     locationStatus: row.locationStatus ?? row.location_status ?? "",
+
     name: row.name ?? "",
+    displayName:
+      row.displayName ||
+      buildDisplayName({
+        name: row.name,
+        brand: row.brand,
+        model: row.model,
+        size: row.size,
+        color: row.color,
+        material: row.material,
+        variantSummary: row.variantSummary,
+        attributes: row.attributes,
+      }) ||
+      row.name ||
+      "",
+
+    systemCategory: row.systemCategory ?? "WOVEN_PP_BAG",
+    category: row.category ?? null,
+    subcategory: row.subcategory ?? null,
+
     sku: row.sku ?? "",
+    barcode: row.barcode ?? null,
+    supplierSku: row.supplierSku ?? null,
+
+    brand: row.brand ?? null,
+    model: row.model ?? null,
+    size: row.size ?? null,
+    color: row.color ?? null,
+    material: row.material ?? null,
+    variantSummary: row.variantSummary ?? null,
+
     unit: row.unit ?? "",
+    stockUnit: row.stockUnit ?? row.unit ?? "",
+    salesUnit: row.salesUnit ?? row.unit ?? "",
+    purchaseUnit: row.purchaseUnit ?? row.unit ?? "",
+    purchaseUnitFactor: Number(row.purchaseUnitFactor ?? 1),
+
     sellingPrice: Number(row.sellingPrice ?? row.selling_price ?? 0),
     purchasePrice: Number(row.purchasePrice ?? row.purchase_price ?? 0),
     maxDiscountPercent: Number(
       row.maxDiscountPercent ?? row.max_discount_percent ?? 0,
     ),
+
+    reorderLevel: Number(row.reorderLevel ?? row.reorder_level ?? 0),
+    trackInventory:
+      row.trackInventory === undefined || row.trackInventory === null
+        ? row.track_inventory !== false
+        : row.trackInventory !== false,
+    attributes: row.attributes ?? null,
+
     isActive:
       row.isActive === undefined || row.isActive === null
         ? row.is_active !== false
         : row.isActive !== false,
+
     qtyOnHand: Number(row.qtyOnHand ?? row.qty_on_hand ?? 0),
+    inventoryValue: Number(row.inventoryValue ?? row.inventory_value ?? 0),
     updatedAt: row.updatedAt ?? row.updated_at ?? null,
   };
 }
 
 async function getOwnerInventorySummary({ includeInactive = false } = {}) {
-  const inactiveSql = includeInactive ? sql`` : sql`AND p.is_active = true`;
+  const inactiveSql = includeInactive
+    ? sql``
+    : sql`AND COALESCE(p.is_active, true) = true`;
 
   const totalsRows = await db.execute(sql`
     SELECT
       COUNT(DISTINCT l.id)::int AS "branchesCount",
       COUNT(DISTINCT p.id)::int AS "productsCount",
-      COALESCE(SUM(COALESCE(b.qty_on_hand, 0)), 0)::int AS "totalQtyOnHand",
+      COALESCE(SUM(COALESCE(b.qty_on_hand, 0)), 0)::bigint AS "totalQtyOnHand",
+      COALESCE(
+        SUM(COALESCE(b.qty_on_hand, 0) * COALESCE(p.cost_price, 0)),
+        0
+      )::bigint AS "inventoryValue",
       COUNT(*) FILTER (
         WHERE COALESCE(b.qty_on_hand, 0) > 0
-          AND COALESCE(b.qty_on_hand, 0) <= ${LOW_STOCK_THRESHOLD}
+          AND COALESCE(b.qty_on_hand, 0) <= COALESCE(NULLIF(p.reorder_level, 0), ${LOW_STOCK_THRESHOLD})
       )::int AS "lowStockCount",
       COUNT(*) FILTER (
         WHERE COALESCE(b.qty_on_hand, 0) <= 0
@@ -80,10 +132,14 @@ async function getOwnerInventorySummary({ includeInactive = false } = {}) {
       l.code AS "locationCode",
       l.status AS "locationStatus",
       COUNT(DISTINCT p.id)::int AS "productsCount",
-      COALESCE(SUM(COALESCE(b.qty_on_hand, 0)), 0)::int AS "totalQtyOnHand",
+      COALESCE(SUM(COALESCE(b.qty_on_hand, 0)), 0)::bigint AS "totalQtyOnHand",
+      COALESCE(
+        SUM(COALESCE(b.qty_on_hand, 0) * COALESCE(p.cost_price, 0)),
+        0
+      )::bigint AS "inventoryValue",
       COUNT(*) FILTER (
         WHERE COALESCE(b.qty_on_hand, 0) > 0
-          AND COALESCE(b.qty_on_hand, 0) <= ${LOW_STOCK_THRESHOLD}
+          AND COALESCE(b.qty_on_hand, 0) <= COALESCE(NULLIF(p.reorder_level, 0), ${LOW_STOCK_THRESHOLD})
       )::int AS "lowStockCount",
       COUNT(*) FILTER (
         WHERE COALESCE(b.qty_on_hand, 0) <= 0
@@ -97,20 +153,67 @@ async function getOwnerInventorySummary({ includeInactive = false } = {}) {
     WHERE 1 = 1
     ${inactiveSql}
     GROUP BY l.id, l.name, l.code, l.status
-    ORDER BY l.name ASC
+    ORDER BY l.name ASC, l.id ASC
+  `);
+
+  const bySystemCategoryRows = await db.execute(sql`
+    SELECT
+      COALESCE(p.system_category, 'OTHER_PP_BAG') AS "systemCategory",
+      COUNT(DISTINCT p.id)::int AS "productsCount",
+      COALESCE(SUM(COALESCE(b.qty_on_hand, 0)), 0)::bigint AS "totalQtyOnHand",
+      COALESCE(
+        SUM(COALESCE(b.qty_on_hand, 0) * COALESCE(p.cost_price, 0)),
+        0
+      )::bigint AS "inventoryValue"
+    FROM products p
+    LEFT JOIN inventory_balances b
+      ON b.product_id = p.id
+     AND b.location_id = p.location_id
+    WHERE 1 = 1
+    ${inactiveSql}
+    GROUP BY COALESCE(p.system_category, 'OTHER_PP_BAG')
+    ORDER BY "inventoryValue" DESC, "systemCategory" ASC
   `);
 
   const totals = (totalsRows.rows || totalsRows)[0] || {
     branchesCount: 0,
     productsCount: 0,
     totalQtyOnHand: 0,
+    inventoryValue: 0,
     lowStockCount: 0,
     outOfStockCount: 0,
   };
 
   return {
-    totals,
-    byLocation: byLocationRows.rows || byLocationRows,
+    totals: {
+      branchesCount: Number(totals.branchesCount ?? 0),
+      productsCount: Number(totals.productsCount ?? 0),
+      totalQtyOnHand: Number(totals.totalQtyOnHand ?? 0),
+      inventoryValue: Number(totals.inventoryValue ?? 0),
+      lowStockCount: Number(totals.lowStockCount ?? 0),
+      outOfStockCount: Number(totals.outOfStockCount ?? 0),
+    },
+    byLocation: (byLocationRows.rows || byLocationRows || []).map((row) => ({
+      locationId: Number(row.locationId ?? 0),
+      locationName: row.locationName ?? "",
+      locationCode: row.locationCode ?? "",
+      locationStatus: row.locationStatus ?? "",
+      productsCount: Number(row.productsCount ?? 0),
+      totalQtyOnHand: Number(row.totalQtyOnHand ?? 0),
+      inventoryValue: Number(row.inventoryValue ?? 0),
+      lowStockCount: Number(row.lowStockCount ?? 0),
+      outOfStockCount: Number(row.outOfStockCount ?? 0),
+    })),
+    bySystemCategory: (
+      bySystemCategoryRows.rows ||
+      bySystemCategoryRows ||
+      []
+    ).map((row) => ({
+      systemCategory: row.systemCategory ?? "OTHER_PP_BAG",
+      productsCount: Number(row.productsCount ?? 0),
+      totalQtyOnHand: Number(row.totalQtyOnHand ?? 0),
+      inventoryValue: Number(row.inventoryValue ?? 0),
+    })),
   };
 }
 
@@ -127,7 +230,9 @@ async function listOwnerInventory({
   const searchValue = String(search || "").trim();
   const hasSearch = searchValue.length > 0;
 
-  const inactiveSql = includeInactive ? sql`` : sql`AND p.is_active = true`;
+  const inactiveSql = includeInactive
+    ? sql``
+    : sql`AND COALESCE(p.is_active, true) = true`;
 
   const locationSql = hasLocationFilter
     ? sql`AND l.id = ${parsedLocationId}`
@@ -139,9 +244,12 @@ async function listOwnerInventory({
         OR COALESCE(p.display_name, '') ILIKE ${"%" + searchValue + "%"}
         OR COALESCE(p.sku, '') ILIKE ${"%" + searchValue + "%"}
         OR COALESCE(p.barcode, '') ILIKE ${"%" + searchValue + "%"}
+        OR COALESCE(p.supplier_sku, '') ILIKE ${"%" + searchValue + "%"}
         OR COALESCE(p.brand, '') ILIKE ${"%" + searchValue + "%"}
         OR COALESCE(p.model, '') ILIKE ${"%" + searchValue + "%"}
+        OR COALESCE(p.system_category, '') ILIKE ${"%" + searchValue + "%"}
         OR COALESCE(p.category, '') ILIKE ${"%" + searchValue + "%"}
+        OR COALESCE(p.subcategory, '') ILIKE ${"%" + searchValue + "%"}
         OR COALESCE(p.unit, '') ILIKE ${"%" + searchValue + "%"}
         OR l.name ILIKE ${"%" + searchValue + "%"}
         OR l.code ILIKE ${"%" + searchValue + "%"}
@@ -152,9 +260,10 @@ async function listOwnerInventory({
     normalizedStockStatus === "OUT"
       ? sql`AND COALESCE(b.qty_on_hand, 0) <= 0`
       : normalizedStockStatus === "LOW"
-        ? sql`AND COALESCE(b.qty_on_hand, 0) > 0 AND COALESCE(b.qty_on_hand, 0) <= ${LOW_STOCK_THRESHOLD}`
+        ? sql`AND COALESCE(b.qty_on_hand, 0) > 0
+               AND COALESCE(b.qty_on_hand, 0) <= COALESCE(NULLIF(p.reorder_level, 0), ${LOW_STOCK_THRESHOLD})`
         : normalizedStockStatus === "IN_STOCK"
-          ? sql`AND COALESCE(b.qty_on_hand, 0) > ${LOW_STOCK_THRESHOLD}`
+          ? sql`AND COALESCE(b.qty_on_hand, 0) > COALESCE(NULLIF(p.reorder_level, 0), ${LOW_STOCK_THRESHOLD})`
           : sql``;
 
   const result = await db.execute(sql`
@@ -164,14 +273,40 @@ async function listOwnerInventory({
       l.name AS "locationName",
       l.code AS "locationCode",
       l.status AS "locationStatus",
+
       p.name AS "name",
+      p.display_name AS "displayName",
+      p.system_category AS "systemCategory",
+      p.category AS "category",
+      p.subcategory AS "subcategory",
+
       p.sku AS "sku",
+      p.barcode AS "barcode",
+      p.supplier_sku AS "supplierSku",
+
+      p.brand AS "brand",
+      p.model AS "model",
+      p.size AS "size",
+      p.color AS "color",
+      p.material AS "material",
+      p.variant_summary AS "variantSummary",
+
       p.unit AS "unit",
+      p.stock_unit AS "stockUnit",
+      p.sales_unit AS "salesUnit",
+      p.purchase_unit AS "purchaseUnit",
+      p.purchase_unit_factor AS "purchaseUnitFactor",
+
       p.selling_price AS "sellingPrice",
       p.cost_price AS "purchasePrice",
       p.max_discount_percent AS "maxDiscountPercent",
+      p.reorder_level AS "reorderLevel",
+      p.track_inventory AS "trackInventory",
+      p.attributes AS "attributes",
       p.is_active AS "isActive",
+
       COALESCE(b.qty_on_hand, 0)::int AS "qtyOnHand",
+      (COALESCE(b.qty_on_hand, 0) * COALESCE(p.cost_price, 0))::bigint AS "inventoryValue",
       b.updated_at AS "updatedAt"
     FROM products p
     INNER JOIN locations l
@@ -184,7 +319,7 @@ async function listOwnerInventory({
     ${locationSql}
     ${searchSql}
     ${stockSql}
-    ORDER BY l.name ASC, p.name ASC, p.id DESC
+    ORDER BY l.name ASC, p.display_name ASC NULLS LAST, p.name ASC, p.id DESC
   `);
 
   const rows = result.rows || result || [];
@@ -202,23 +337,47 @@ async function getOwnerProductInventoryByProductId({
     throw err;
   }
 
-  const inactiveSql = includeInactive ? sql`` : sql`AND p.is_active = true`;
+  const inactiveSql = includeInactive
+    ? sql``
+    : sql`AND COALESCE(p.is_active, true) = true`;
 
   const rowsResult = await db.execute(sql`
     SELECT
       p.id::int AS "productId",
       p.name AS "name",
+      p.display_name AS "displayName",
+      p.system_category AS "systemCategory",
+      p.category AS "category",
+      p.subcategory AS "subcategory",
       p.sku AS "sku",
+      p.barcode AS "barcode",
+      p.supplier_sku AS "supplierSku",
+      p.brand AS "brand",
+      p.model AS "model",
+      p.size AS "size",
+      p.color AS "color",
+      p.material AS "material",
+      p.variant_summary AS "variantSummary",
       p.unit AS "unit",
+      p.stock_unit AS "stockUnit",
+      p.sales_unit AS "salesUnit",
+      p.purchase_unit AS "purchaseUnit",
+      p.purchase_unit_factor AS "purchaseUnitFactor",
+      p.reorder_level AS "reorderLevel",
+      p.track_inventory AS "trackInventory",
+      p.attributes AS "attributes",
+
       l.id::int AS "locationId",
       l.name AS "locationName",
       l.code AS "locationCode",
       l.status AS "locationStatus",
+
       COALESCE(b.qty_on_hand, 0)::int AS "qtyOnHand",
       p.selling_price AS "sellingPrice",
       p.cost_price AS "purchasePrice",
       p.max_discount_percent AS "maxDiscountPercent",
       p.is_active AS "isActive",
+      (COALESCE(b.qty_on_hand, 0) * COALESCE(p.cost_price, 0))::bigint AS "inventoryValue",
       b.updated_at AS "updatedAt"
     FROM products p
     INNER JOIN locations l
@@ -242,14 +401,40 @@ async function getOwnerProductInventoryByProductId({
   return {
     productId: Number(rows[0].productId),
     name: rows[0].name,
+    displayName:
+      rows[0].displayName ||
+      buildDisplayName({
+        name: rows[0].name,
+        brand: rows[0].brand,
+        model: rows[0].model,
+        size: rows[0].size,
+        color: rows[0].color,
+        material: rows[0].material,
+        variantSummary: rows[0].variantSummary,
+        attributes: rows[0].attributes,
+      }) ||
+      rows[0].name,
+    systemCategory: rows[0].systemCategory ?? "WOVEN_PP_BAG",
+    category: rows[0].category ?? null,
+    subcategory: rows[0].subcategory ?? null,
     sku: rows[0].sku,
+    barcode: rows[0].barcode ?? null,
+    supplierSku: rows[0].supplierSku ?? null,
     unit: rows[0].unit,
+    stockUnit: rows[0].stockUnit ?? rows[0].unit,
+    salesUnit: rows[0].salesUnit ?? rows[0].unit,
+    purchaseUnit: rows[0].purchaseUnit ?? rows[0].unit,
+    purchaseUnitFactor: Number(rows[0].purchaseUnitFactor ?? 1),
+    reorderLevel: Number(rows[0].reorderLevel ?? 0),
+    trackInventory: rows[0].trackInventory !== false,
+    attributes: rows[0].attributes ?? null,
     branches: rows.map((row) => ({
       locationId: Number(row.locationId),
       locationName: row.locationName,
       locationCode: row.locationCode,
       locationStatus: row.locationStatus,
       qtyOnHand: Number(row.qtyOnHand ?? 0),
+      inventoryValue: Number(row.inventoryValue ?? 0),
       sellingPrice: Number(row.sellingPrice ?? 0),
       purchasePrice: Number(row.purchasePrice ?? 0),
       maxDiscountPercent: Number(row.maxDiscountPercent ?? 0),
@@ -301,12 +486,14 @@ async function adjustOwnerInventory({
         id: products.id,
         locationId: products.locationId,
         name: products.name,
+        displayName: products.displayName,
         sku: products.sku,
         unit: products.unit,
-        isActive: products.isActive,
+        stockUnit: products.stockUnit,
         sellingPrice: products.sellingPrice,
         purchasePrice: products.costPrice,
         maxDiscountPercent: products.maxDiscountPercent,
+        isActive: products.isActive,
       })
       .from(products)
       .where(
@@ -393,7 +580,7 @@ async function adjustOwnerInventory({
       action: "OWNER_INVENTORY_ADJUST",
       entity: "inventory_balance",
       entityId: parsedProductId,
-      description: `Owner adjusted inventory for ${product.name} at ${location.name}: ${parsedQtyChange > 0 ? "+" : ""}${parsedQtyChange}`,
+      description: `Owner adjusted inventory for ${product.displayName || product.name} at ${location.name}: ${parsedQtyChange > 0 ? "+" : ""}${parsedQtyChange}`,
       meta: {
         locationId: parsedLocationId,
         productId: parsedProductId,
@@ -412,13 +599,16 @@ async function adjustOwnerInventory({
       locationCode: location.code,
       locationStatus: location.status,
       name: product.name,
+      displayName: product.displayName || product.name,
       sku: product.sku,
       unit: product.unit,
+      stockUnit: product.stockUnit ?? product.unit,
       sellingPrice: Number(product.sellingPrice ?? 0),
       purchasePrice: Number(product.purchasePrice ?? 0),
       maxDiscountPercent: Number(product.maxDiscountPercent ?? 0),
       isActive: product.isActive !== false,
       qtyOnHand: nextQty,
+      inventoryValue: nextQty * Number(product.purchasePrice ?? 0),
       updatedAt: new Date().toISOString(),
       qtyChange: parsedQtyChange,
       reason: cleanReason,

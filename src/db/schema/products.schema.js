@@ -8,6 +8,7 @@ const {
   bigint,
   text,
   index,
+  jsonb,
 } = require("drizzle-orm/pg-core");
 
 const { locations } = require("./locations.schema");
@@ -21,52 +22,57 @@ const products = pgTable(
       .notNull()
       .references(() => locations.id, { onDelete: "cascade" }),
 
-    // Existing core fields
-    name: varchar("name", { length: 160 }).notNull(),
-    sku: varchar("sku", { length: 80 }),
-    unit: varchar("unit", { length: 30 }).notNull().default("PIECE"),
+    name: varchar("name", { length: 180 }).notNull(),
+    displayName: varchar("display_name", { length: 220 }),
 
-    sellingPrice: bigint("selling_price", { mode: "number" })
-      .notNull()
-      .default(0),
-
-    costPrice: bigint("cost_price", { mode: "number" }).notNull().default(0),
-
-    maxDiscountPercent: integer("max_discount_percent").notNull().default(0),
-
-    isActive: boolean("is_active").notNull().default(true),
-
-    notes: text("notes"),
-
-    // New professional catalog fields
     productType: varchar("product_type", { length: 40 })
       .notNull()
-      .default("HARDWARE"), // HARDWARE | APPAREL | FOOTWEAR | PPE | ACCESSORY | OTHER
+      .default("PP_BAG"),
 
-    category: varchar("category", { length: 80 }).default("GENERAL"),
+    systemCategory: varchar("system_category", { length: 80 })
+      .notNull()
+      .default("WOVEN_PP_BAG"),
+
+    category: varchar("category", { length: 120 }),
     subcategory: varchar("subcategory", { length: 80 }),
+
+    sku: varchar("sku", { length: 80 }),
+    barcode: varchar("barcode", { length: 120 }),
+    supplierCode: varchar("supplier_code", { length: 120 }),
+    supplierSku: varchar("supplier_sku", { length: 120 }),
 
     brand: varchar("brand", { length: 80 }),
     model: varchar("model", { length: 120 }),
-
-    variantLabel: varchar("variant_label", { length: 120 }), // e.g. "Size 42 Black"
+    variantLabel: varchar("variant_label", { length: 120 }),
+    variantSummary: varchar("variant_summary", { length: 200 }),
     size: varchar("size", { length: 40 }),
     color: varchar("color", { length: 40 }),
     material: varchar("material", { length: 80 }),
 
-    barcode: varchar("barcode", { length: 120 }),
-    supplierCode: varchar("supplier_code", { length: 120 }),
+    unit: varchar("unit", { length: 40 }).notNull().default("PIECE"),
+    stockUnit: varchar("stock_unit", { length: 40 }).notNull().default("PIECE"),
+    salesUnit: varchar("sales_unit", { length: 40 }).notNull().default("PIECE"),
+    purchaseUnit: varchar("purchase_unit", { length: 40 })
+      .notNull()
+      .default("PIECE"),
+    purchaseUnitFactor: integer("purchase_unit_factor").notNull().default(1),
 
+    sellingPrice: bigint("selling_price", { mode: "number" })
+      .notNull()
+      .default(0),
+    costPrice: bigint("cost_price", { mode: "number" }).notNull().default(0),
+    maxDiscountPercent: integer("max_discount_percent").notNull().default(0),
+
+    trackInventory: boolean("track_inventory").notNull().default(true),
     reorderLevel: integer("reorder_level").notNull().default(0),
+    attributes: jsonb("attributes"),
 
-    // For mixed quincaillerie catalog
-    gender: varchar("gender", { length: 20 }), // MEN | WOMEN | UNISEX | KIDS
-    season: varchar("season", { length: 40 }),
+    isActive: boolean("is_active").notNull().default(true),
+    notes: text("notes"),
 
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
-
     updatedAt: timestamp("updated_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -77,6 +83,9 @@ const products = pgTable(
       table.locationId,
       table.name,
     ),
+    productsLocationDisplayNameIdx: index(
+      "products_location_display_name_idx",
+    ).on(table.locationId, table.displayName),
     productsLocationSkuIdx: index("products_location_sku_idx").on(
       table.locationId,
       table.sku,
@@ -85,10 +94,16 @@ const products = pgTable(
       table.locationId,
       table.barcode,
     ),
+    productsLocationSupplierSkuIdx: index(
+      "products_location_supplier_sku_idx",
+    ).on(table.locationId, table.supplierSku),
     productsLocationTypeIdx: index("products_location_type_idx").on(
       table.locationId,
       table.productType,
     ),
+    productsLocationSystemCategoryIdx: index(
+      "products_location_system_category_idx",
+    ).on(table.locationId, table.systemCategory),
     productsLocationCategoryIdx: index("products_location_category_idx").on(
       table.locationId,
       table.category,

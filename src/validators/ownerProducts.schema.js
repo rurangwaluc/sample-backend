@@ -1,23 +1,21 @@
 "use strict";
 
 const { z } = require("zod");
-const {
-  PRODUCT_CATEGORIES,
-  PRODUCT_UNITS,
-} = require("../utils/productCatalog");
+const { SYSTEM_CATEGORIES, PRODUCT_UNITS } = require("../utils/productCatalog");
 
 const updateOwnerProductSchema = z.object({
   name: z.string().trim().min(2).max(180).optional(),
 
   displayName: z.string().trim().min(2).max(220).optional(),
 
-  category: z
+  systemCategory: z
     .string()
     .trim()
     .transform((v) => String(v || "").toUpperCase())
-    .refine((v) => PRODUCT_CATEGORIES.includes(v), "Invalid category")
+    .refine((v) => SYSTEM_CATEGORIES.includes(v), "Invalid systemCategory")
     .optional(),
 
+  category: z.string().trim().max(120).optional(),
   subcategory: z.string().trim().max(80).optional(),
 
   sku: z.string().trim().min(1).max(80).optional(),
