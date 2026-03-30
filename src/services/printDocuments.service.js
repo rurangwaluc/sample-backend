@@ -145,7 +145,7 @@ function documentShell({ title, subtitle, body, branch }) {
     .totals {
       margin-top: 18px;
       margin-left: auto;
-      width: 320px;
+      width: 340px;
     }
     .totals-row {
       display: flex;
@@ -179,6 +179,10 @@ function documentShell({ title, subtitle, body, branch }) {
       font-size: 13px;
       line-height: 1.6;
       white-space: pre-wrap;
+    }
+    .muted {
+      color: #6b7280;
+      font-size: 12px;
     }
     @media print {
       body { background: white; }
@@ -239,7 +243,7 @@ function renderProformaHtml({ header, items }) {
       <thead>
         <tr>
           <th style="width:50px;">#</th>
-          <th>Item</th>
+          <th>Bag Description</th>
           <th>SKU</th>
           <th>Unit</th>
           <th class="right">Qty</th>
@@ -297,7 +301,7 @@ function renderProformaHtml({ header, items }) {
 
   return documentShell({
     title: "PROFORMA INVOICE",
-    subtitle: "Quotation / pre-invoice document",
+    subtitle: "Wholesale polypropylene bag quotation",
     body,
     branch: header,
   });
@@ -344,7 +348,7 @@ function renderDeliveryNoteHtml({ header, items }) {
       <thead>
         <tr>
           <th style="width:50px;">#</th>
-          <th>Item</th>
+          <th>Bag Description</th>
           <th>SKU</th>
           <th>Unit</th>
           <th class="right">Qty</th>
@@ -368,7 +372,7 @@ function renderDeliveryNoteHtml({ header, items }) {
 
     <div class="totals">
       <div class="totals-row">
-        <span>Total item lines</span>
+        <span>Total bag lines</span>
         <span>${esc(header.totalItems)}</span>
       </div>
       <div class="totals-row final">
@@ -397,7 +401,101 @@ function renderDeliveryNoteHtml({ header, items }) {
 
   return documentShell({
     title: "DELIVERY NOTE",
-    subtitle: "Goods dispatch / handover document",
+    subtitle: "Wholesale polypropylene bag dispatch document",
+    body,
+    branch: header,
+  });
+}
+
+function renderPurchaseOrderHtml({ header, items }) {
+  const body = `
+    <div class="card-grid">
+      <div class="card">
+        <div class="label">Purchase Order No</div>
+        <div class="value">${esc(header.poNo || `#${header.id}`)}</div>
+      </div>
+      <div class="card">
+        <div class="label">Supplier</div>
+        <div class="value">${esc(header.supplierName || "-")}</div>
+      </div>
+      <div class="card">
+        <div class="label">Reference</div>
+        <div class="value">${esc(header.reference || "-")}</div>
+      </div>
+      <div class="card">
+        <div class="label">Ordered At</div>
+        <div class="value">${esc(fmtDate(header.orderedAt || header.createdAt))}</div>
+      </div>
+      <div class="card">
+        <div class="label">Expected At</div>
+        <div class="value">${esc(fmtDate(header.expectedAt))}</div>
+      </div>
+      <div class="card">
+        <div class="label">Status</div>
+        <div class="value">${esc(header.status || "-")}</div>
+      </div>
+    </div>
+
+    <table>
+      <thead>
+        <tr>
+          <th style="width:50px;">#</th>
+          <th>Bag Description</th>
+          <th>SKU</th>
+          <th>Stock Unit</th>
+          <th>Purchase Unit</th>
+          <th class="right">Qty Ordered</th>
+          <th class="right">Unit Cost</th>
+          <th class="right">Line Total</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${items
+          .map(
+            (row, idx) => `
+          <tr>
+            <td>${idx + 1}</td>
+            <td>
+              ${esc(row.productDisplayName || row.productName || "-")}
+              ${
+                row.note
+                  ? `<div class="muted" style="margin-top:4px;">${esc(row.note)}</div>`
+                  : ""
+              }
+            </td>
+            <td>${esc(row.productSku || "-")}</td>
+            <td>${esc(row.stockUnit || "-")}</td>
+            <td>${esc(row.purchaseUnit || "-")}</td>
+            <td class="right">${esc(row.qtyOrdered)}</td>
+            <td class="right">${esc(money(row.unitCost, header.currency))}</td>
+            <td class="right">${esc(money(row.lineTotal, header.currency))}</td>
+          </tr>`,
+          )
+          .join("")}
+      </tbody>
+    </table>
+
+    <div class="totals">
+      <div class="totals-row">
+        <span>Subtotal</span>
+        <span>${esc(money(header.subtotalAmount, header.currency))}</span>
+      </div>
+      <div class="totals-row final">
+        <span>Total</span>
+        <span>${esc(money(header.totalAmount, header.currency))}</span>
+      </div>
+    </div>
+
+    ${
+      header.notes
+        ? `<div class="note"><strong>Note</strong><br/>${esc(header.notes)}</div>`
+        : ""
+    }
+  `;
+
+  return documentShell({
+    title: "PURCHASE ORDER",
+    subtitle: "Supplier order for wholesale polypropylene bags",
     body,
     branch: header,
   });
@@ -406,4 +504,5 @@ function renderDeliveryNoteHtml({ header, items }) {
 module.exports = {
   renderProformaHtml,
   renderDeliveryNoteHtml,
+  renderPurchaseOrderHtml,
 };

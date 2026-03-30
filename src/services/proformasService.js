@@ -5,8 +5,14 @@ const { sql, eq } = require("drizzle-orm");
 
 const { proformas } = require("../db/schema/proformas.schema");
 const { proformaItems } = require("../db/schema/proforma_items.schema");
+const { products } = require("../db/schema/products.schema");
 const { safeLogAudit } = require("./auditService");
 const { renderProformaHtml } = require("./printDocuments.service");
+const {
+  buildDisplayName,
+  normalizeUnit,
+  normalizeSystemCategory,
+} = require("../utils/productCatalog");
 
 function clampInt(n, min, max, fallback) {
   const x = Number(n);
@@ -87,6 +93,38 @@ function mapHeader(row) {
   };
 }
 
+async function getProductSnapshot(locationId, productId) {
+  const rows = await db
+    .select({
+      id: products.id,
+      locationId: products.locationId,
+      name: products.name,
+      displayName: products.displayName,
+      sku: products.sku,
+      stockUnit: products.stockUnit,
+      salesUnit: products.salesUnit,
+      sellingPrice: products.sellingPrice,
+      systemCategory: products.systemCategory,
+      category: products.category,
+      brand: products.brand,
+      model: products.model,
+      size: products.size,
+      color: products.color,
+      material: products.material,
+      variantSummary: products.variantSummary,
+      attributes: products.attributes,
+      isActive: products.isActive,
+    })
+    .from(products)
+    .where(eq(products.id, Number(productId)))
+    .limit(1);
+
+  const row = rows[0];
+  if (!row) return null;
+  if (Number(row.locationId) !== Number(locationId)) return null;
+  return row;
+}
+
 async function createProforma({ actorUser, locationId, payload }) {
   return db.transaction(async (tx) => {
     const items = Array.isArray(payload.items) ? payload.items : [];
@@ -97,26 +135,88 @@ async function createProforma({ actorUser, locationId, payload }) {
     }
 
     let subtotal = 0;
-    const cleanItems = items.map((row) => {
+    const cleanItems = [];
+
+    for (const row of items) {
+      let snapshot = null;
+
+      if (row.productId != null) {
+        snapshot = await getProductSnapshot(locationId, row.productId);
+        if (!snapshot) {
+          const err = new Error(`Product ${row.productId} not found`);
+          err.code = "PRODUCT_NOT_FOUND";
+          err.debug = { productId: row.productId };
+          throw err;
+        }
+
+        if (snapshot.isActive === false) {
+          const err = new Error(`Product ${row.productId} is archived`);
+          err.code = "PRODUCT_ARCHIVED";
+          err.debug = { productId: row.productId };
+          throw err;
+        }
+      }
+
       const qty = Math.max(1, toInt(row.qty, 0) || 0);
-      const unitPrice = Math.max(0, toInt(row.unitPrice, 0) || 0);
+
+      const unitPrice = snapshot
+        ? Math.max(
+            0,
+            toInt(
+              row.unitPrice == null ? snapshot.sellingPrice : row.unitPrice,
+              0,
+            ) || 0,
+          )
+        : Math.max(0, toInt(row.unitPrice, 0) || 0);
+
       const lineTotal = qty * unitPrice;
       subtotal += lineTotal;
 
-      return {
-        productId: row.productId == null ? null : Number(row.productId),
-        productName: cleanText(row.productName, 180) || "Item",
-        productDisplayName:
-          cleanText(row.productDisplayName, 220) ||
-          cleanText(row.productName, 180) ||
-          "Item",
-        productSku: cleanText(row.productSku, 80),
-        stockUnit: cleanText(row.stockUnit, 40) || "PIECE",
-        qty,
-        unitPrice,
-        lineTotal,
-      };
-    });
+      if (snapshot) {
+        cleanItems.push({
+          productId: Number(snapshot.id),
+          productName: cleanText(snapshot.name, 180) || "Bag",
+          productDisplayName:
+            cleanText(snapshot.displayName, 220) ||
+            buildDisplayName({
+              name: snapshot.name,
+              brand: snapshot.brand,
+              model: snapshot.model,
+              size: snapshot.size,
+              color: snapshot.color,
+              material: snapshot.material,
+              variantSummary: snapshot.variantSummary,
+              attributes: snapshot.attributes,
+            }) ||
+            cleanText(snapshot.name, 180) ||
+            "Bag",
+          productSku: cleanText(snapshot.sku, 80),
+          stockUnit: normalizeUnit(
+            snapshot.salesUnit || snapshot.stockUnit || "BAG",
+          ),
+          qty,
+          unitPrice,
+          lineTotal,
+          systemCategory: normalizeSystemCategory(snapshot.systemCategory),
+          category: cleanText(snapshot.category, 120),
+        });
+      } else {
+        const manualName = cleanText(row.productName, 180) || "Bag";
+        cleanItems.push({
+          productId: null,
+          productName: manualName,
+          productDisplayName:
+            cleanText(row.productDisplayName, 220) || manualName,
+          productSku: cleanText(row.productSku, 80),
+          stockUnit: normalizeUnit(row.stockUnit || "BAG"),
+          qty,
+          unitPrice,
+          lineTotal,
+          systemCategory: normalizeSystemCategory(row.systemCategory),
+          category: cleanText(row.category, 120),
+        });
+      }
+    }
 
     const totalAmount = subtotal;
 
@@ -364,7 +464,7 @@ async function getProformaById({ proformaId, locationId = null }) {
       productName: row.productName ?? null,
       productDisplayName: row.productDisplayName ?? null,
       productSku: row.productSku ?? null,
-      stockUnit: row.stockUnit ?? "PIECE",
+      stockUnit: normalizeUnit(row.stockUnit || "BAG"),
       qty: Number(row.qty || 0),
       unitPrice: Number(row.unitPrice || 0),
       lineTotal: Number(row.lineTotal || 0),

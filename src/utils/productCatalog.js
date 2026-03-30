@@ -16,8 +16,9 @@ const SYSTEM_CATEGORIES = [
 ];
 
 const PRODUCT_UNITS = [
-  "PIECE",
+  "BAG",
   "BALE",
+  "PIECE",
   "BUNDLE",
   "PACK",
   "DOZEN",
@@ -56,8 +57,8 @@ function normalizeUnit(value) {
     .trim()
     .toUpperCase();
 
-  if (!v) return "PIECE";
-  return PRODUCT_UNITS.includes(v) ? v : "PIECE";
+  if (!v) return "BAG";
+  return PRODUCT_UNITS.includes(v) ? v : "BAG";
 }
 
 function normalizePositiveInt(value, fallback = 0) {

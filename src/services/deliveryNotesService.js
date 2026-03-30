@@ -7,11 +7,10 @@ const { deliveryNotes } = require("../db/schema/delivery_notes.schema");
 const {
   deliveryNoteItems,
 } = require("../db/schema/delivery_note_items.schema");
-const { sales } = require("../db/schema/sales.schema");
-const { saleItems } = require("../db/schema/sale_items.schema");
 const { customers } = require("../db/schema/customers.schema");
 const { safeLogAudit } = require("./auditService");
 const { renderDeliveryNoteHtml } = require("./printDocuments.service");
+const { normalizeUnit } = require("../utils/productCatalog");
 
 function clampInt(n, min, max, fallback) {
   const x = Number(n);
@@ -110,9 +109,10 @@ async function createDeliveryNote({ actorUser, locationId, payload }) {
     const saleStatus = String(sale.status || "")
       .trim()
       .toUpperCase();
+
     if (!["COMPLETED", "PARTIALLY_REFUNDED", "REFUNDED"].includes(saleStatus)) {
       const err = new Error(
-        "Delivery note can only be issued for completed/fulfilled sale records",
+        "Delivery note can only be issued for completed sale records",
       );
       err.code = "BAD_STATUS";
       throw err;
@@ -138,12 +138,14 @@ async function createDeliveryNote({ actorUser, locationId, payload }) {
       SELECT
         si.id,
         si.product_id as "productId",
-        si.product_name as "productName",
-        si.product_display_name as "productDisplayName",
-        si.product_sku as "productSku",
-        si.stock_unit as "stockUnit",
+        COALESCE(si.product_name, p.name) as "productName",
+        COALESCE(si.product_display_name, p.display_name, p.name) as "productDisplayName",
+        COALESCE(si.product_sku, p.sku) as "productSku",
+        COALESCE(si.stock_unit, p.sales_unit, p.stock_unit, p.unit, 'BAG') as "stockUnit",
         si.qty
       FROM sale_items si
+      LEFT JOIN products p
+        ON p.id = si.product_id
       WHERE si.sale_id = ${saleId}
       ORDER BY si.id ASC
     `);
@@ -208,13 +210,13 @@ async function createDeliveryNote({ actorUser, locationId, payload }) {
         deliveryNoteId: Number(created.id),
         saleItemId: Number(row.id),
         productId: row.productId == null ? null : Number(row.productId),
-        productName: cleanText(row.productName, 180) || "Item",
+        productName: cleanText(row.productName, 180) || "Bag",
         productDisplayName:
           cleanText(row.productDisplayName, 220) ||
           cleanText(row.productName, 180) ||
-          "Item",
+          "Bag",
         productSku: cleanText(row.productSku, 80),
-        stockUnit: cleanText(row.stockUnit, 40) || "PIECE",
+        stockUnit: normalizeUnit(row.stockUnit || "BAG"),
         qty: Number(row.qty || 0),
         createdAt: new Date(),
       });
@@ -432,7 +434,7 @@ async function getDeliveryNoteById({ deliveryNoteId, locationId = null }) {
       productName: row.productName ?? null,
       productDisplayName: row.productDisplayName ?? null,
       productSku: row.productSku ?? null,
-      stockUnit: row.stockUnit ?? "PIECE",
+      stockUnit: normalizeUnit(row.stockUnit || "BAG"),
       qty: Number(row.qty || 0),
       createdAt: row.createdAt,
     })),

@@ -1,30 +1,26 @@
+"use strict";
+
 const { db } = require("../config/db");
+const { sql, eq, and, inArray } = require("drizzle-orm");
+
 const notificationService = require("./notificationService");
+
 const { sales } = require("../db/schema/sales.schema");
 const { saleItems } = require("../db/schema/sale_items.schema");
 const { products } = require("../db/schema/products.schema");
 const { inventoryBalances } = require("../db/schema/inventory.schema");
 const { auditLogs } = require("../db/schema/audit_logs.schema");
 const { customers } = require("../db/schema/customers.schema");
-const { eq, and, inArray } = require("drizzle-orm");
+
+const { buildDisplayName, normalizeUnit } = require("../utils/productCatalog");
 
 /**
- * BCS sales flow:
+ * Sales flow
  * - Seller creates sale as DRAFT (no stock movement)
  * - Storekeeper fulfills sale -> deduct inventory -> status becomes FULFILLED
  * - Seller marks PAID -> status becomes AWAITING_PAYMENT_RECORD
  * - Cashier records payment -> sale becomes COMPLETED
- * - Seller creates credit through POST /credits (NOT through /sales/:id/mark)
- *
- * Statuses:
- * - DRAFT
- * - FULFILLED
- * - PENDING                // credit lifecycle status on sale side
- * - APPROVED               // approved credit
- * - PARTIALLY_PAID         // future-ready credit repayment state
- * - AWAITING_PAYMENT_RECORD
- * - COMPLETED
- * - CANCELLED
+ * - Credit is created through /credits, not through sales mark
  */
 
 const PAYMENT_METHODS = new Set(["CASH", "MOMO", "CARD", "BANK", "OTHER"]);
@@ -96,6 +92,47 @@ function normName(v) {
   return String(v).trim();
 }
 
+function toId(v) {
+  const n = Number(v);
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+
+function toNote(v) {
+  const s = v == null ? "" : String(v);
+  const t = s.trim();
+  if (!t) return null;
+  return t.slice(0, 500);
+}
+
+function buildSaleItemSnapshot(prod) {
+  const productName = String(prod.name || "").trim() || "Bag";
+  const productDisplayName =
+    String(prod.displayName || "").trim() ||
+    buildDisplayName({
+      name: prod.name,
+      brand: prod.brand,
+      model: prod.model,
+      size: prod.size,
+      color: prod.color,
+      material: prod.material,
+      variantSummary: prod.variantSummary,
+      attributes: prod.attributes,
+    }) ||
+    productName;
+
+  return {
+    productName,
+    productDisplayName,
+    productSku: prod.sku ? String(prod.sku).trim() : null,
+    stockUnit: normalizeUnit(prod.stockUnit || prod.unit || "BAG"),
+    salesUnit: normalizeUnit(
+      prod.salesUnit || prod.stockUnit || prod.unit || "BAG",
+    ),
+    systemCategory: String(prod.systemCategory || "WOVEN_PP_BAG").trim(),
+    category: prod.category ? String(prod.category).trim() : null,
+  };
+}
+
 async function createSale({
   locationId,
   sellerId,
@@ -107,18 +144,6 @@ async function createSale({
   discountPercent,
   discountAmount,
 }) {
-  function toNote(v) {
-    const s = v == null ? "" : String(v);
-    const t = s.trim();
-    if (!t) return null;
-    return t.slice(0, 200);
-  }
-
-  function toId(v) {
-    const n = Number(v);
-    return Number.isInteger(n) && n > 0 ? n : null;
-  }
-
   const locId = toId(locationId);
   const sellId = toId(sellerId);
 
@@ -173,6 +198,13 @@ async function createSale({
         throw err;
       }
 
+      if (prod.isActive === false) {
+        const err = new Error("Product is archived");
+        err.code = "PRODUCT_ARCHIVED";
+        err.debug = { productId: pid };
+        throw err;
+      }
+
       const qty = toInt(it?.qty);
       if (qty <= 0) {
         const err = new Error("Invalid qty");
@@ -208,6 +240,7 @@ async function createSale({
 
       const itemPct =
         it?.discountPercent == null ? 0 : toPct(it.discountPercent);
+
       if (itemPct < 0) {
         const err = new Error("Invalid discount percent");
         err.code = "BAD_DISCOUNT_PERCENT";
@@ -240,6 +273,8 @@ async function createSale({
         throw err;
       }
 
+      const snapshot = buildSaleItemSnapshot(prod);
+
       subtotal += line.lineTotal;
 
       lines.push({
@@ -247,6 +282,13 @@ async function createSale({
         qty: line.qty,
         unitPrice: line.unitPrice,
         lineTotal: line.lineTotal,
+        productName: snapshot.productName,
+        productDisplayName: snapshot.productDisplayName,
+        productSku: snapshot.productSku,
+        stockUnit: snapshot.stockUnit,
+        salesUnit: snapshot.salesUnit,
+        systemCategory: snapshot.systemCategory,
+        category: snapshot.category,
       });
     }
 
@@ -369,13 +411,30 @@ async function createSale({
       .returning();
 
     for (const ln of lines) {
-      await tx.insert(saleItems).values({
-        saleId: sale.id,
-        productId: ln.productId,
-        qty: ln.qty,
-        unitPrice: ln.unitPrice,
-        lineTotal: ln.lineTotal,
-      });
+      await tx.execute(sql`
+        INSERT INTO sale_items (
+          sale_id,
+          product_id,
+          product_name,
+          product_display_name,
+          product_sku,
+          stock_unit,
+          qty,
+          unit_price,
+          line_total
+        )
+        VALUES (
+          ${Number(sale.id)},
+          ${Number(ln.productId)},
+          ${ln.productName},
+          ${ln.productDisplayName},
+          ${ln.productSku},
+          ${ln.salesUnit || ln.stockUnit || "BAG"},
+          ${Number(ln.qty)},
+          ${Number(ln.unitPrice)},
+          ${Number(ln.lineTotal)}
+        )
+      `);
     }
 
     await tx.insert(auditLogs).values({
@@ -393,7 +452,7 @@ async function createSale({
       actorUserId: sellId,
       type: "SALE_DRAFT_CREATED",
       title: "Stock release needed",
-      body: `A new sale needs stock release (Sale #${sale.id}).`,
+      body: `A new bag sale needs stock release (Sale #${sale.id}).`,
       priority: "high",
       entity: "sale",
       entityId: Number(sale.id),
@@ -481,7 +540,7 @@ async function fulfillSale({ locationId, storeKeeperId, saleId, note }) {
       .update(sales)
       .set({
         status: "FULFILLED",
-        note: note != null ? note : sale.note,
+        note: note != null ? toNote(note) : sale.note,
         updatedAt: new Date(),
       })
       .where(eq(sales.id, saleId))
@@ -546,7 +605,6 @@ async function markSale({
 
     const raw = String(status || "").toUpperCase();
 
-    // Credit is no longer created through salesService.markSale in BCS.
     if (raw === "PENDING" || raw === "CREDIT") {
       const err = new Error("Use POST /credits to create a credit request");
       err.code = "USE_CREDIT_ENDPOINT";
@@ -620,7 +678,7 @@ async function markSale({
       actorUserId: actorId,
       type: "SALE_AWAITING_PAYMENT_RECORD",
       title: `Sale #${saleId} needs payment record`,
-      body: `Seller marked this sale as PAID (${methodSafe}). Please record payment to complete.`,
+      body: `Seller marked this bag sale as PAID (${methodSafe}). Please record payment to complete.`,
       priority: "high",
       entity: "sale",
       entityId: Number(saleId),

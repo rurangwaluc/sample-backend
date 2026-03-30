@@ -33,7 +33,7 @@ function toInt(value) {
 }
 
 function buildUnits(data) {
-  const fallbackUnit = normalizeUnit(data.unit || "PIECE");
+  const fallbackUnit = normalizeUnit(data.unit || "BAG");
   const stockUnit = normalizeUnit(data.stockUnit || fallbackUnit);
   const salesUnit = normalizeUnit(data.salesUnit || stockUnit);
   const purchaseUnit = normalizeUnit(data.purchaseUnit || stockUnit);
@@ -86,10 +86,10 @@ function mapOwnerProductRow(row) {
     material: row.material ?? null,
     variantSummary: row.variantSummary ?? null,
 
-    unit: row.unit ?? row.stockUnit ?? "PIECE",
-    stockUnit: row.stockUnit ?? row.unit ?? "PIECE",
-    salesUnit: row.salesUnit ?? row.unit ?? "PIECE",
-    purchaseUnit: row.purchaseUnit ?? row.unit ?? "PIECE",
+    unit: row.unit ?? row.stockUnit ?? "BAG",
+    stockUnit: row.stockUnit ?? row.unit ?? "BAG",
+    salesUnit: row.salesUnit ?? row.unit ?? "BAG",
+    purchaseUnit: row.purchaseUnit ?? row.unit ?? "BAG",
     purchaseUnitFactor: Number(row.purchaseUnitFactor ?? 1),
 
     sellingPrice: Number(row.sellingPrice ?? 0),
@@ -204,12 +204,10 @@ async function getOwnerProductsSummary({ includeInactive = false } = {}) {
   };
 }
 
-async function listOwnerProducts({
-  locationId,
-  includeInactive = false,
-  search,
-  status = "ALL",
-} = {}) {
+async function listOwnerProductsWithExecutor(
+  executor,
+  { locationId, includeInactive = false, search, status = "ALL" } = {},
+) {
   const normalizedStatus = normalizeStatus(status);
   const parsedLocationId = toInt(locationId);
   const hasLocationFilter = !!parsedLocationId;
@@ -246,7 +244,7 @@ async function listOwnerProducts({
         ? sql`AND p.is_active = false`
         : sql``;
 
-  const result = await db.execute(sql`
+  const result = await executor.execute(sql`
     SELECT
       p.id::int AS "productId",
       p.location_id::int AS "locationId",
@@ -306,6 +304,10 @@ async function listOwnerProducts({
   `);
 
   return (result.rows || result || []).map(mapOwnerProductRow);
+}
+
+async function listOwnerProducts(params = {}) {
+  return listOwnerProductsWithExecutor(db, params);
 }
 
 async function getOwnerProductBranchesByProductId({
@@ -534,12 +536,12 @@ async function createOwnerProduct({ actorUser, data }) {
       locationId: targetLocationId,
     });
 
-    const rows = await listOwnerProducts({
+    const rows = await listOwnerProductsWithExecutor(tx, {
       locationId: targetLocationId,
       includeInactive: true,
     });
 
-    return rows.find((row) => row.productId === created.id) || null;
+    return rows.find((row) => row.productId === Number(created.id)) || null;
   });
 }
 
@@ -776,8 +778,13 @@ async function updateOwnerProduct({ actorUser, productId, data }) {
       locationId: nextLocationId,
     });
 
-    const rows = await listOwnerProducts({ includeInactive: true });
-    return rows.find((row) => row.productId === parsedProductId) || null;
+    const rows = await listOwnerProductsWithExecutor(tx, {
+      includeInactive: true,
+    });
+
+    return (
+      rows.find((row) => row.productId === Number(parsedProductId)) || null
+    );
   });
 }
 
@@ -845,12 +852,14 @@ async function updateOwnerProductPricing({
       locationId: existing.locationId,
     });
 
-    const fresh = await listOwnerProducts({
+    const fresh = await listOwnerProductsWithExecutor(tx, {
       locationId: existing.locationId,
       includeInactive: true,
     });
 
-    return fresh.find((row) => row.productId === parsedProductId) || null;
+    return (
+      fresh.find((row) => row.productId === Number(parsedProductId)) || null
+    );
   });
 }
 

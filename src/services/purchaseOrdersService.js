@@ -13,6 +13,12 @@ const { users } = require("../db/schema/users.schema");
 const { products } = require("../db/schema/products.schema");
 
 const { safeLogAudit } = require("./auditService");
+const { renderPurchaseOrderHtml } = require("./printDocuments.service");
+const {
+  cleanText: cleanCatalogText,
+  normalizeUnit,
+  buildDisplayName,
+} = require("../utils/productCatalog");
 
 function clampInt(n, min, max, fallback) {
   const x = Number(n);
@@ -120,6 +126,13 @@ async function getProductForPO(tx, { locationId, productId }) {
       purchaseUnit: products.purchaseUnit,
       purchaseUnitFactor: products.purchaseUnitFactor,
       costPrice: products.costPrice,
+      brand: products.brand,
+      model: products.model,
+      size: products.size,
+      color: products.color,
+      material: products.material,
+      variantSummary: products.variantSummary,
+      attributes: products.attributes,
       isActive: products.isActive,
     })
     .from(products)
@@ -136,17 +149,36 @@ async function getProductForPO(tx, { locationId, productId }) {
 
 function computePOItem(product, rawItem) {
   const qtyOrdered = Math.max(1, toInt(rawItem.qtyOrdered, 1) || 1);
-  const unitCost = Math.max(0, toInt(rawItem.unitCost, 0) || 0);
+
+  const fallbackCost = product ? Number(product.costPrice || 0) : 0;
+  const unitCost = Math.max(
+    0,
+    toInt(rawItem.unitCost == null ? fallbackCost : rawItem.unitCost, 0) || 0,
+  );
+
   const lineTotal = qtyOrdered * unitCost;
 
   if (product) {
     return {
       productId: Number(product.id),
-      productName: product.name,
-      productDisplayName: product.displayName || product.name,
-      productSku: product.sku || null,
-      stockUnit: product.stockUnit || "PIECE",
-      purchaseUnit: product.purchaseUnit || product.stockUnit || "PIECE",
+      productName: cleanCatalogText(product.name, 180) || "Bag",
+      productDisplayName:
+        cleanCatalogText(product.displayName, 220) ||
+        buildDisplayName({
+          name: product.name,
+          brand: product.brand,
+          model: product.model,
+          size: product.size,
+          color: product.color,
+          material: product.material,
+          variantSummary: product.variantSummary,
+          attributes: product.attributes,
+        }) ||
+        cleanCatalogText(product.name, 180) ||
+        "Bag",
+      productSku: cleanCatalogText(product.sku, 80),
+      stockUnit: normalizeUnit(product.stockUnit || "BAG"),
+      purchaseUnit: normalizeUnit(product.purchaseUnit || "BALE"),
       purchaseUnitFactor: Math.max(
         1,
         toInt(product.purchaseUnitFactor, 1) || 1,
@@ -161,7 +193,9 @@ function computePOItem(product, rawItem) {
 
   const manualName = cleanText(rawItem.productName, 180);
   if (!manualName) {
-    const err = new Error("Each PO line needs productId or productName");
+    const err = new Error(
+      "Each purchase order line needs productId or productName",
+    );
     err.code = "BAD_ITEMS";
     throw err;
   }
@@ -169,11 +203,12 @@ function computePOItem(product, rawItem) {
   return {
     productId: null,
     productName: manualName,
-    productDisplayName: manualName,
-    productSku: null,
-    stockUnit: "PIECE",
-    purchaseUnit: "PIECE",
-    purchaseUnitFactor: 1,
+    productDisplayName:
+      cleanText(rawItem.productDisplayName, 220) || manualName,
+    productSku: cleanText(rawItem.productSku, 80),
+    stockUnit: normalizeUnit(rawItem.stockUnit || "BAG"),
+    purchaseUnit: normalizeUnit(rawItem.purchaseUnit || "BALE"),
+    purchaseUnitFactor: Math.max(1, toInt(rawItem.purchaseUnitFactor, 1) || 1),
     qtyOrdered,
     qtyReceived: 0,
     unitCost,
@@ -840,37 +875,24 @@ async function getPurchaseOrderById({ purchaseOrderId, locationId = null }) {
       poi.qty_received as "qtyReceived",
       poi.unit_cost as "unitCost",
       poi.line_total as "lineTotal",
-      poi.note as "note",
+      poi.note,
       poi.created_at as "createdAt"
     FROM purchase_order_items poi
     WHERE poi.purchase_order_id = ${id}
     ORDER BY poi.id ASC
   `);
 
-  const itemRows = itemsRes.rows || itemsRes || [];
-
   return {
-    purchaseOrder: mapPurchaseOrderRow({
-      ...head,
-      itemsCount: itemRows.length,
-      qtyOrderedTotal: itemRows.reduce(
-        (sum, row) => sum + Number(row.qtyOrdered || 0),
-        0,
-      ),
-      qtyReceivedTotal: itemRows.reduce(
-        (sum, row) => sum + Number(row.qtyReceived || 0),
-        0,
-      ),
-    }),
-    items: itemRows.map((row) => ({
+    purchaseOrder: mapPurchaseOrderRow(head),
+    items: (itemsRes.rows || itemsRes || []).map((row) => ({
       id: Number(row.id),
       purchaseOrderId: Number(row.purchaseOrderId),
       productId: row.productId == null ? null : Number(row.productId),
       productName: row.productName ?? null,
       productDisplayName: row.productDisplayName ?? null,
       productSku: row.productSku ?? null,
-      stockUnit: row.stockUnit ?? "PIECE",
-      purchaseUnit: row.purchaseUnit ?? "PIECE",
+      stockUnit: normalizeUnit(row.stockUnit || "BAG"),
+      purchaseUnit: normalizeUnit(row.purchaseUnit || "BALE"),
       purchaseUnitFactor: Number(row.purchaseUnitFactor || 1),
       qtyOrdered: Number(row.qtyOrdered || 0),
       qtyReceived: Number(row.qtyReceived || 0),
@@ -882,6 +904,22 @@ async function getPurchaseOrderById({ purchaseOrderId, locationId = null }) {
   };
 }
 
+async function renderPurchaseOrderDocument({
+  purchaseOrderId,
+  locationId = null,
+}) {
+  const data = await getPurchaseOrderById({ purchaseOrderId, locationId });
+  if (!data) return null;
+
+  return {
+    ...data,
+    html: renderPurchaseOrderHtml({
+      header: data.purchaseOrder,
+      items: data.items,
+    }),
+  };
+}
+
 module.exports = {
   createPurchaseOrder,
   updatePurchaseOrder,
@@ -889,4 +927,5 @@ module.exports = {
   cancelPurchaseOrder,
   listPurchaseOrders,
   getPurchaseOrderById,
+  renderPurchaseOrderDocument,
 };
