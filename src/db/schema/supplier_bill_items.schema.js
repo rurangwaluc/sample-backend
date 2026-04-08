@@ -5,7 +5,7 @@ const {
   text,
   bigint,
 } = require("drizzle-orm/pg-core");
-const { supplierBills } = require("./supplierBills.schema");
+const { supplierBills } = require("./supplier_bills.schema");
 
 const supplierBillItems = pgTable("supplier_bill_items", {
   id: serial("id").primaryKey(),

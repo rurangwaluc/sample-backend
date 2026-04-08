@@ -7,7 +7,7 @@ const {
   timestamp,
 } = require("drizzle-orm/pg-core");
 const { suppliers } = require("./suppliers.schema");
-const { supplierBills } = require("./supplierBills.schema");
+const { supplierBills } = require("./supplier_bills.schema");
 
 const supplierPayments = pgTable("supplier_payments", {
   id: serial("id").primaryKey(),
