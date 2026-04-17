@@ -137,40 +137,7 @@ async function getOwnerReportsOverview({
           ${locationIdInt ? sql`AND r.location_id = ${locationIdInt}` : sql``}
           ${fromTs ? sql`AND r.created_at >= ${fromTs}` : sql``}
           ${toExclusiveTs ? sql`AND r.created_at < ${toExclusiveTs}` : sql``}
-      ) as "refundsTotal",
-
-      (
-        SELECT COUNT(*)::int
-        FROM products p
-        WHERE 1 = 1
-          ${locationIdInt ? sql`AND p.location_id = ${locationIdInt}` : sql``}
-          AND COALESCE(p.is_active, true) = true
-      ) as "activeProductsCount",
-
-      (
-        SELECT COALESCE(SUM(COALESCE(b.qty_on_hand, 0)), 0)::bigint
-        FROM products p
-        LEFT JOIN inventory_balances b
-          ON b.product_id = p.id
-         AND b.location_id = p.location_id
-        WHERE 1 = 1
-          ${locationIdInt ? sql`AND p.location_id = ${locationIdInt}` : sql``}
-          AND COALESCE(p.is_active, true) = true
-      ) as "inventoryQtyOnHand",
-
-      (
-        SELECT COALESCE(
-          SUM(COALESCE(b.qty_on_hand, 0) * COALESCE(p.cost_price, 0)),
-          0
-        )::bigint
-        FROM products p
-        LEFT JOIN inventory_balances b
-          ON b.product_id = p.id
-         AND b.location_id = p.location_id
-        WHERE 1 = 1
-          ${locationIdInt ? sql`AND p.location_id = ${locationIdInt}` : sql``}
-          AND COALESCE(p.is_active, true) = true
-      ) as "inventoryValue"
+      ) as "refundsTotal"
     FROM locations l
     WHERE 1 = 1
       ${locationIdInt ? sql`AND l.id = ${locationIdInt}` : sql``}
@@ -188,9 +155,6 @@ async function getOwnerReportsOverview({
       creditsOutstandingTotal: 0,
       refundsCount: 0,
       refundsTotal: 0,
-      activeProductsCount: 0,
-      inventoryQtyOnHand: 0,
-      inventoryValue: 0,
     }
   );
 }
@@ -292,34 +256,7 @@ async function getOwnerBranchPerformance({ from = null, to = null }) {
         WHERE cl.location_id = l.id
           ${fromTs ? sql`AND cl.created_at >= ${fromTs}` : sql``}
           ${toExclusiveTs ? sql`AND cl.created_at < ${toExclusiveTs}` : sql``}
-      ), 0)::bigint as "cashOutTotal",
-
-      COALESCE((
-        SELECT COUNT(*)::int
-        FROM products p
-        WHERE p.location_id = l.id
-          AND COALESCE(p.is_active, true) = true
-      ), 0)::int as "activeProductsCount",
-
-      COALESCE((
-        SELECT SUM(COALESCE(b.qty_on_hand, 0))::bigint
-        FROM products p
-        LEFT JOIN inventory_balances b
-          ON b.product_id = p.id
-         AND b.location_id = p.location_id
-        WHERE p.location_id = l.id
-          AND COALESCE(p.is_active, true) = true
-      ), 0)::bigint as "inventoryQtyOnHand",
-
-      COALESCE((
-        SELECT SUM(COALESCE(b.qty_on_hand, 0) * COALESCE(p.cost_price, 0))::bigint
-        FROM products p
-        LEFT JOIN inventory_balances b
-          ON b.product_id = p.id
-         AND b.location_id = p.location_id
-        WHERE p.location_id = l.id
-          AND COALESCE(p.is_active, true) = true
-      ), 0)::bigint as "inventoryValue"
+      ), 0)::bigint as "cashOutTotal"
     FROM locations l
     WHERE 1 = 1
     ORDER BY l.name ASC
@@ -397,54 +334,11 @@ async function getOwnerFinancialSummary({
     ORDER BY "total" DESC
   `);
 
-  const inventoryBySystemCategoryRes = await db.execute(sql`
-    SELECT
-      COALESCE(p.system_category, 'OTHER_PP_BAG') as "systemCategory",
-      COUNT(DISTINCT p.id)::int as "productsCount",
-      COALESCE(SUM(COALESCE(b.qty_on_hand, 0)), 0)::bigint as "qtyOnHand",
-      COALESCE(
-        SUM(COALESCE(b.qty_on_hand, 0) * COALESCE(p.cost_price, 0)),
-        0
-      )::bigint as "inventoryValue"
-    FROM products p
-    LEFT JOIN inventory_balances b
-      ON b.product_id = p.id
-     AND b.location_id = p.location_id
-    WHERE 1 = 1
-      ${locationIdInt ? sql`AND p.location_id = ${locationIdInt}` : sql``}
-      AND COALESCE(p.is_active, true) = true
-    GROUP BY 1
-    ORDER BY "inventoryValue" DESC, "systemCategory" ASC
-  `);
-
-  const inventoryByBusinessCategoryRes = await db.execute(sql`
-    SELECT
-      COALESCE(NULLIF(TRIM(p.category), ''), 'UNCATEGORIZED') as "category",
-      COUNT(DISTINCT p.id)::int as "productsCount",
-      COALESCE(SUM(COALESCE(b.qty_on_hand, 0)), 0)::bigint as "qtyOnHand",
-      COALESCE(
-        SUM(COALESCE(b.qty_on_hand, 0) * COALESCE(p.cost_price, 0)),
-        0
-      )::bigint as "inventoryValue"
-    FROM products p
-    LEFT JOIN inventory_balances b
-      ON b.product_id = p.id
-     AND b.location_id = p.location_id
-    WHERE 1 = 1
-      ${locationIdInt ? sql`AND p.location_id = ${locationIdInt}` : sql``}
-      AND COALESCE(p.is_active, true) = true
-    GROUP BY 1
-    ORDER BY "inventoryValue" DESC, "category" ASC
-    LIMIT ${clampLimit(25, 25, 100)}
-  `);
-
   return {
     salesByStatus: rowsOf(salesByStatusRes),
     paymentsByMethod: rowsOf(paymentsByMethodRes),
     creditsByStatus: rowsOf(creditsByStatusRes),
     refundsByMethod: rowsOf(refundsByMethodRes),
-    inventoryBySystemCategory: rowsOf(inventoryBySystemCategoryRes),
-    inventoryByBusinessCategory: rowsOf(inventoryByBusinessCategoryRes),
   };
 }
 

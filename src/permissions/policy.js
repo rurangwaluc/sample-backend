@@ -1,3 +1,5 @@
+"use strict";
+
 const ROLES = require("./roles");
 const ACTIONS = require("./actions");
 
@@ -6,14 +8,17 @@ const ALL_ACTION_STRINGS = Object.values(ACTIONS).filter(
 );
 
 const ALIASES = ACTIONS.__ALIASES__ || {};
+
 const REVERSE_ALIASES = (() => {
   const reverse = {};
+
   for (const [legacy, targets] of Object.entries(ALIASES)) {
-    for (const t of targets) {
-      if (!reverse[t]) reverse[t] = new Set();
-      reverse[t].add(legacy);
+    for (const target of targets) {
+      if (!reverse[target]) reverse[target] = new Set();
+      reverse[target].add(legacy);
     }
   }
+
   return reverse;
 })();
 
@@ -55,6 +60,8 @@ const policy = {
     ACTIONS.INVENTORY_ADJUST,
     ACTIONS.INVENTORY_ARRIVAL_CREATE,
     ACTIONS.INVENTORY_ARRIVAL_VIEW,
+    ACTIONS.GOODS_RECEIPT_CREATE,
+    ACTIONS.GOODS_RECEIPT_VIEW,
 
     ACTIONS.INVENTORY_ADJUST_REQUEST_CREATE,
     ACTIONS.INVENTORY_ADJUST_REQUEST_VIEW,
@@ -84,14 +91,7 @@ const policy = {
 
     ACTIONS.PAYMENT_RECORD,
     ACTIONS.PAYMENT_VIEW,
-
-    ACTIONS.CREDIT_CREATE,
-    ACTIONS.CREDIT_VIEW,
-    ACTIONS.CREDIT_DECIDE,
-    ACTIONS.CREDIT_SETTLE,
-
-    ACTIONS.REFUND_CREATE,
-    ACTIONS.REFUND_VIEW,
+    ACTIONS.OWNER_PAYMENTS_VIEW,
 
     ACTIONS.CASH_SESSION_VIEW,
     ACTIONS.CASH_SESSION_OPEN,
@@ -100,9 +100,24 @@ const policy = {
     ACTIONS.CASH_DEPOSIT_CREATE,
     ACTIONS.EXPENSE_VIEW,
     ACTIONS.EXPENSE_CREATE,
+    ACTIONS.EXPENSE_VOID,
     ACTIONS.CASH_RECONCILE_VIEW,
     ACTIONS.CASH_RECONCILE_CREATE,
     ACTIONS.CASH_REPORT_VIEW,
+
+    ACTIONS.OWNER_LOAN_SUMMARY_VIEW,
+    ACTIONS.OWNER_LOAN_VIEW,
+    ACTIONS.OWNER_LOAN_CREATE,
+    ACTIONS.OWNER_LOAN_UPDATE,
+    ACTIONS.OWNER_LOAN_REPAYMENT_CREATE,
+    ACTIONS.OWNER_LOAN_VOID,
+    ACTIONS.CREDIT_CREATE,
+    ACTIONS.CREDIT_VIEW,
+    ACTIONS.CREDIT_DECIDE,
+    ACTIONS.CREDIT_SETTLE,
+
+    ACTIONS.REFUND_CREATE,
+    ACTIONS.REFUND_VIEW,
 
     ACTIONS.UPLOAD_CREATE,
     ACTIONS.UPLOAD_VIEW,
@@ -117,6 +132,12 @@ const policy = {
     ACTIONS.SUPPLIER_BILL_DELETE,
     ACTIONS.SUPPLIER_BILL_PAYMENT_CREATE,
     ACTIONS.SUPPLIER_REPORT_VIEW,
+
+    ACTIONS.PURCHASE_ORDER_VIEW,
+    ACTIONS.PURCHASE_ORDER_CREATE,
+    ACTIONS.PURCHASE_ORDER_UPDATE,
+    ACTIONS.PURCHASE_ORDER_APPROVE,
+    ACTIONS.PURCHASE_ORDER_CANCEL,
 
     ACTIONS.CASH_LEDGER_MANAGE,
     ACTIONS.CASH_LEDGER_VIEW,
@@ -145,6 +166,7 @@ const policy = {
 
     ACTIONS.INVENTORY_VIEW,
     ACTIONS.INVENTORY_ARRIVAL_VIEW,
+    ACTIONS.GOODS_RECEIPT_VIEW,
     ACTIONS.INVENTORY_ADJUST_REQUEST_VIEW,
     ACTIONS.INVENTORY_ADJUST_REQUEST_DECIDE,
 
@@ -157,14 +179,21 @@ const policy = {
     ACTIONS.REFUND_VIEW,
 
     ACTIONS.PAYMENT_VIEW,
-
-    ACTIONS.CREDIT_VIEW,
-    ACTIONS.CREDIT_DECIDE,
+    ACTIONS.OWNER_PAYMENTS_VIEW,
 
     ACTIONS.CASH_REPORT_VIEW,
     ACTIONS.CASH_RECONCILE_VIEW,
     ACTIONS.CASH_RECONCILE_CREATE,
     ACTIONS.CASH_LEDGER_VIEW,
+    ACTIONS.EXPENSE_VIEW,
+    ACTIONS.EXPENSE_VOID,
+
+    ACTIONS.OWNER_LOAN_VIEW,
+    ACTIONS.OWNER_LOAN_SUMMARY_VIEW,
+    ACTIONS.OWNER_LOAN_REPAYMENT_CREATE,
+
+    ACTIONS.CREDIT_VIEW,
+    ACTIONS.CREDIT_DECIDE,
 
     ACTIONS.USER_VIEW,
     ACTIONS.UPLOAD_VIEW,
@@ -175,12 +204,16 @@ const policy = {
     ACTIONS.SUPPLIER_BILL_UPDATE,
     ACTIONS.SUPPLIER_REPORT_VIEW,
 
+    ACTIONS.PURCHASE_ORDER_VIEW,
+    ACTIONS.PURCHASE_ORDER_CREATE,
+    ACTIONS.PURCHASE_ORDER_UPDATE,
+    ACTIONS.PURCHASE_ORDER_APPROVE,
+
     ACTIONS.MANAGER_DASHBOARD_VIEW,
     ACTIONS.CUSTOMER_VIEW,
   ],
 
   [ROLES.STORE_KEEPER]: [
-    ACTIONS.INVENTORY_CREATE,
     ACTIONS.AUTH_ME,
     ACTIONS.MESSAGE_CREATE,
     ACTIONS.MESSAGE_VIEW,
@@ -193,8 +226,11 @@ const policy = {
     ACTIONS.NOTIFICATION_MARK_READ,
 
     ACTIONS.INVENTORY_VIEW,
+    ACTIONS.INVENTORY_CREATE,
     ACTIONS.INVENTORY_ARRIVAL_CREATE,
     ACTIONS.INVENTORY_ARRIVAL_VIEW,
+    ACTIONS.GOODS_RECEIPT_CREATE,
+    ACTIONS.GOODS_RECEIPT_VIEW,
 
     ACTIONS.INVENTORY_ADJUST_REQUEST_CREATE,
     ACTIONS.INVENTORY_ADJUST_REQUEST_VIEW,
@@ -209,6 +245,8 @@ const policy = {
 
     ACTIONS.SALE_VIEW,
     ACTIONS.SALE_FULFILL,
+
+    ACTIONS.PURCHASE_ORDER_VIEW,
 
     ACTIONS.UPLOAD_CREATE,
     ACTIONS.UPLOAD_VIEW,
@@ -271,6 +309,9 @@ const policy = {
     ACTIONS.CASH_RECONCILE_VIEW,
     ACTIONS.CASH_RECONCILE_CREATE,
 
+    ACTIONS.OWNER_LOAN_VIEW,
+    ACTIONS.OWNER_LOAN_REPAYMENT_CREATE,
+
     ACTIONS.REFUND_VIEW,
 
     ACTIONS.NOTIFICATION_VIEW,
@@ -287,9 +328,41 @@ const policy = {
   ],
 };
 
+function normalizeRoleKey(role) {
+  return String(role || "")
+    .trim()
+    .replace(/[\s-]+/g, "_");
+}
+
+function getAllowedActionsForRole(role) {
+  const raw = normalizeRoleKey(role);
+  if (!raw) return [];
+
+  const candidates = [
+    raw,
+    raw.toUpperCase(),
+    raw.toLowerCase(),
+    raw
+      .split("_")
+      .map((part) => part.toUpperCase())
+      .join("_"),
+  ];
+
+  for (const key of candidates) {
+    if (Array.isArray(policy[key])) return policy[key];
+  }
+
+  const matchedKey = Object.keys(policy).find(
+    (key) => normalizeRoleKey(key).toLowerCase() === raw.toLowerCase(),
+  );
+
+  return matchedKey ? policy[matchedKey] || [] : [];
+}
+
 function can(role, action) {
-  const allowed = policy[role] || [];
   if (!action) return false;
+
+  const allowed = getAllowedActionsForRole(role);
 
   if (allowed.includes(action)) return true;
 

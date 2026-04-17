@@ -1,26 +1,39 @@
-"use strict";
-
 const { db } = require("../config/db");
-const { sql, eq, and, inArray } = require("drizzle-orm");
-
 const notificationService = require("./notificationService");
-
 const { sales } = require("../db/schema/sales.schema");
 const { saleItems } = require("../db/schema/sale_items.schema");
 const { products } = require("../db/schema/products.schema");
 const { inventoryBalances } = require("../db/schema/inventory.schema");
 const { auditLogs } = require("../db/schema/audit_logs.schema");
 const { customers } = require("../db/schema/customers.schema");
-
-const { buildDisplayName, normalizeUnit } = require("../utils/productCatalog");
+const { eq, and, inArray } = require("drizzle-orm");
 
 /**
- * Sales flow
+ * BCS sales flow:
  * - Seller creates sale as DRAFT (no stock movement)
  * - Storekeeper fulfills sale -> deduct inventory -> status becomes FULFILLED
  * - Seller marks PAID -> status becomes AWAITING_PAYMENT_RECORD
  * - Cashier records payment -> sale becomes COMPLETED
- * - Credit is created through /credits, not through sales mark
+ * - Seller creates credit through POST /credits (NOT through /sales/:id/mark)
+ *
+ * Statuses:
+ * - DRAFT
+ * - FULFILLED
+ * - PENDING
+ * - APPROVED
+ * - PARTIALLY_PAID
+ * - AWAITING_PAYMENT_RECORD
+ * - COMPLETED
+ * - CANCELLED
+ *
+ * Controlled seller uplift:
+ * - Official manager/system selling price is always fetched from products.sellingPrice
+ * - Seller may add extraChargePerUnit (>= 0)
+ * - Backend computes final unitPrice = baseUnitPrice + extraChargePerUnit
+ * - If extraChargePerUnit > 0, priceAdjustmentReason is required
+ * - We preserve audit truth in sale_items:
+ *   baseUnitPrice, extraChargePerUnit, unitPrice, priceAdjustmentReason,
+ *   priceAdjustmentType, priceAdjustedByUserId, priceAdjustedAt
  */
 
 const PAYMENT_METHODS = new Set(["CASH", "MOMO", "CARD", "BANK", "OTHER"]);
@@ -39,6 +52,11 @@ function toPct(n) {
   const x = Number(n);
   if (!Number.isFinite(x)) return 0;
   return x;
+}
+
+function safeText(v, max = 300) {
+  if (v == null) return "";
+  return String(v).trim().slice(0, max);
 }
 
 function computeLine({ qty, unitPrice, discountPercent, discountAmount }) {
@@ -92,47 +110,6 @@ function normName(v) {
   return String(v).trim();
 }
 
-function toId(v) {
-  const n = Number(v);
-  return Number.isInteger(n) && n > 0 ? n : null;
-}
-
-function toNote(v) {
-  const s = v == null ? "" : String(v);
-  const t = s.trim();
-  if (!t) return null;
-  return t.slice(0, 500);
-}
-
-function buildSaleItemSnapshot(prod) {
-  const productName = String(prod.name || "").trim() || "Bag";
-  const productDisplayName =
-    String(prod.displayName || "").trim() ||
-    buildDisplayName({
-      name: prod.name,
-      brand: prod.brand,
-      model: prod.model,
-      size: prod.size,
-      color: prod.color,
-      material: prod.material,
-      variantSummary: prod.variantSummary,
-      attributes: prod.attributes,
-    }) ||
-    productName;
-
-  return {
-    productName,
-    productDisplayName,
-    productSku: prod.sku ? String(prod.sku).trim() : null,
-    stockUnit: normalizeUnit(prod.stockUnit || prod.unit || "BAG"),
-    salesUnit: normalizeUnit(
-      prod.salesUnit || prod.stockUnit || prod.unit || "BAG",
-    ),
-    systemCategory: String(prod.systemCategory || "WOVEN_PP_BAG").trim(),
-    category: prod.category ? String(prod.category).trim() : null,
-  };
-}
-
 async function createSale({
   locationId,
   sellerId,
@@ -144,6 +121,18 @@ async function createSale({
   discountPercent,
   discountAmount,
 }) {
+  function toNote(v) {
+    const s = v == null ? "" : String(v);
+    const t = s.trim();
+    if (!t) return null;
+    return t.slice(0, 200);
+  }
+
+  function toId(v) {
+    const n = Number(v);
+    return Number.isInteger(n) && n > 0 ? n : null;
+  }
+
   const locId = toId(locationId);
   const sellId = toId(sellerId);
 
@@ -176,7 +165,15 @@ async function createSale({
 
   return db.transaction(async (tx) => {
     const prodRows = await tx
-      .select()
+      .select({
+        id: products.id,
+        locationId: products.locationId,
+        name: products.name,
+        sku: products.sku,
+        sellingPrice: products.sellingPrice,
+        maxDiscountPercent: products.maxDiscountPercent,
+        isActive: products.isActive,
+      })
       .from(products)
       .where(and(eq(products.locationId, locId), inArray(products.id, ids)));
 
@@ -199,8 +196,8 @@ async function createSale({
       }
 
       if (prod.isActive === false) {
-        const err = new Error("Product is archived");
-        err.code = "PRODUCT_ARCHIVED";
+        const err = new Error("Product is inactive");
+        err.code = "PRODUCT_INACTIVE";
         err.debug = { productId: pid };
         throw err;
       }
@@ -213,34 +210,37 @@ async function createSale({
         throw err;
       }
 
-      const sellingPrice = toInt(prod.sellingPrice ?? prod.selling_price ?? 0);
-      const requestedUnit =
-        it?.unitPrice == null ? sellingPrice : toInt(it.unitPrice);
-
-      if (requestedUnit < 0) {
-        const err = new Error("Invalid unit price");
-        err.code = "BAD_UNIT_PRICE";
-        err.debug = { productId: pid, requestedUnit };
+      const baseUnitPrice = toInt(prod.sellingPrice ?? 0);
+      if (baseUnitPrice < 0) {
+        const err = new Error("Invalid product selling price");
+        err.code = "BAD_PRODUCT_PRICE";
+        err.debug = { productId: pid, sellingPrice: prod.sellingPrice };
         throw err;
       }
 
-      if (requestedUnit > sellingPrice) {
-        const err = new Error("Unit price cannot be above selling price");
-        err.code = "PRICE_TOO_HIGH";
-        err.debug = { productId: pid, sellingPrice, requestedUnit };
-        throw err;
-      }
-
-      const itemMax = clamp(
-        toPct(prod.maxDiscountPercent ?? prod.max_discount_percent ?? 0),
+      const extraChargePerUnit = Math.max(
         0,
-        100,
+        toInt(it?.extraChargePerUnit ?? 0),
       );
+
+      const priceAdjustmentReason = safeText(it?.priceAdjustmentReason, 300);
+
+      if (extraChargePerUnit > 0 && !priceAdjustmentReason) {
+        const err = new Error(
+          "priceAdjustmentReason is required when extra charge is added",
+        );
+        err.code = "MISSING_PRICE_ADJUSTMENT_REASON";
+        err.debug = { productId: pid, extraChargePerUnit };
+        throw err;
+      }
+
+      const finalUnitPrice = baseUnitPrice + extraChargePerUnit;
+
+      const itemMax = clamp(toPct(prod.maxDiscountPercent ?? 0), 0, 100);
       strictMaxDisc = Math.min(strictMaxDisc, itemMax);
 
       const itemPct =
         it?.discountPercent == null ? 0 : toPct(it.discountPercent);
-
       if (itemPct < 0) {
         const err = new Error("Invalid discount percent");
         err.code = "BAD_DISCOUNT_PERCENT";
@@ -261,7 +261,7 @@ async function createSale({
 
       const line = computeLine({
         qty,
-        unitPrice: requestedUnit,
+        unitPrice: finalUnitPrice,
         discountPercent: itemPct,
         discountAmount: it?.discountAmount,
       });
@@ -273,22 +273,21 @@ async function createSale({
         throw err;
       }
 
-      const snapshot = buildSaleItemSnapshot(prod);
-
       subtotal += line.lineTotal;
 
       lines.push({
         productId: pid,
         qty: line.qty,
+
+        baseUnitPrice,
+        extraChargePerUnit,
         unitPrice: line.unitPrice,
         lineTotal: line.lineTotal,
-        productName: snapshot.productName,
-        productDisplayName: snapshot.productDisplayName,
-        productSku: snapshot.productSku,
-        stockUnit: snapshot.stockUnit,
-        salesUnit: snapshot.salesUnit,
-        systemCategory: snapshot.systemCategory,
-        category: snapshot.category,
+
+        priceAdjustmentReason: priceAdjustmentReason || null,
+        priceAdjustmentType: extraChargePerUnit > 0 ? "SELLER_UPLIFT" : "NONE",
+        priceAdjustedByUserId: extraChargePerUnit > 0 ? sellId : null,
+        priceAdjustedAt: extraChargePerUnit > 0 ? new Date() : null,
       });
     }
 
@@ -411,30 +410,21 @@ async function createSale({
       .returning();
 
     for (const ln of lines) {
-      await tx.execute(sql`
-        INSERT INTO sale_items (
-          sale_id,
-          product_id,
-          product_name,
-          product_display_name,
-          product_sku,
-          stock_unit,
-          qty,
-          unit_price,
-          line_total
-        )
-        VALUES (
-          ${Number(sale.id)},
-          ${Number(ln.productId)},
-          ${ln.productName},
-          ${ln.productDisplayName},
-          ${ln.productSku},
-          ${ln.salesUnit || ln.stockUnit || "BAG"},
-          ${Number(ln.qty)},
-          ${Number(ln.unitPrice)},
-          ${Number(ln.lineTotal)}
-        )
-      `);
+      await tx.insert(saleItems).values({
+        saleId: sale.id,
+        productId: ln.productId,
+        qty: ln.qty,
+
+        baseUnitPrice: ln.baseUnitPrice,
+        extraChargePerUnit: ln.extraChargePerUnit,
+        unitPrice: ln.unitPrice,
+        lineTotal: ln.lineTotal,
+
+        priceAdjustmentReason: ln.priceAdjustmentReason,
+        priceAdjustmentType: ln.priceAdjustmentType,
+        priceAdjustedByUserId: ln.priceAdjustedByUserId,
+        priceAdjustedAt: ln.priceAdjustedAt,
+      });
     }
 
     await tx.insert(auditLogs).values({
@@ -446,13 +436,28 @@ async function createSale({
       description: `Sale #${sale.id} created (DRAFT), total=${saleDisc.totalAmount}`,
     });
 
+    const upliftedLines = lines.filter(
+      (ln) => Number(ln.extraChargePerUnit || 0) > 0,
+    );
+
+    if (upliftedLines.length > 0) {
+      await tx.insert(auditLogs).values({
+        locationId: locId,
+        userId: sellId,
+        action: "SALE_PRICE_UPLIFT",
+        entity: "sale",
+        entityId: sale.id,
+        description: `Sale #${sale.id} created with seller uplift on ${upliftedLines.length} line(s)`,
+      });
+    }
+
     await notificationService.notifyRoles({
       locationId: locId,
       roles: ["store_keeper"],
       actorUserId: sellId,
       type: "SALE_DRAFT_CREATED",
       title: "Stock release needed",
-      body: `A new bag sale needs stock release (Sale #${sale.id}).`,
+      body: `A new sale needs stock release (Sale #${sale.id}).`,
       priority: "high",
       entity: "sale",
       entityId: Number(sale.id),
@@ -540,7 +545,7 @@ async function fulfillSale({ locationId, storeKeeperId, saleId, note }) {
       .update(sales)
       .set({
         status: "FULFILLED",
-        note: note != null ? toNote(note) : sale.note,
+        note: note != null ? note : sale.note,
         updatedAt: new Date(),
       })
       .where(eq(sales.id, saleId))
@@ -678,7 +683,7 @@ async function markSale({
       actorUserId: actorId,
       type: "SALE_AWAITING_PAYMENT_RECORD",
       title: `Sale #${saleId} needs payment record`,
-      body: `Seller marked this bag sale as PAID (${methodSafe}). Please record payment to complete.`,
+      body: `Seller marked this sale as PAID (${methodSafe}). Please record payment to complete.`,
       priority: "high",
       entity: "sale",
       entityId: Number(saleId),
